@@ -104,6 +104,14 @@
     var out = [];
     if (!S.ready || S.playerIndex < 0 || S.ended) return out;
 
+    // 新开一局时 turn 会回退，用它判定并清掉上一局的 focus 残留
+    if (S._focusTurn === undefined || S.turn < S._focusTurn) {
+      S._focus = -1;
+      S._focusStuck = 0;
+      S._preferCity = false;
+    }
+    S._focusTurn = S.turn;
+
     var n = S.n;
     var pid = S.playerIndex;
     var nbr = neighbors(S);
@@ -235,6 +243,7 @@
           if (S._focusStuck > 12) {
             S._focus = -1;
             S._focusStuck = 0;
+            S._preferCity = true;
           }
         } else {
           S._focusStuck = 0;
@@ -355,9 +364,55 @@
      * 优先级照 hunter：敌方将军 > 最近的敌方地块 > 最近的未占城市 > 最远的可探索格。
      * 目标粘性是关键——每回合换目标等于每回合重新铺一条路，兵永远在路上。
      */
+    // 最近的未占城市（按从我方领土出发的 BFS 步数）
+    function nearestCityGoal() {
+      var dist = new Int32Array(n).fill(-1);
+      var queue = [];
+      var i;
+      for (i = 0; i < n; i++) {
+        if (owner[i] === pid) {
+          dist[i] = 0;
+          queue.push(i);
+        }
+      }
+      for (var h = 0; h < queue.length; h++) {
+        var cur = queue[h];
+        var list = nbr[cur];
+        for (var k = 0; k < list.length; k++) {
+          var j = list[k];
+          if (dist[j] !== -1 || !isPassable(owner, j)) continue;
+          dist[j] = dist[cur] + 1;
+          queue.push(j);
+        }
+      }
+      var best = -1;
+      var bd = Infinity;
+      for (i = 0; i < n; i++) {
+        if (!isCity[i] || owner[i] === pid || dist[i] < 0) continue;
+        if (dist[i] < bd) {
+          bd = dist[i];
+          best = i;
+        }
+      }
+      return best;
+    }
+
     function pickFocus() {
       var prev = S._focus;
       if (prev >= 0 && prev < n && owner[prev] !== pid) return prev;
+
+      // 上一次 focus 卡死了：说明正面啃不动敌将，转去吃城市——
+      // 城市是除将军外唯一的稳定兵源，多一座就多一条 +1/回合的进项。
+      if (S._preferCity) {
+        var cg = nearestCityGoal();
+        if (cg >= 0) {
+          S._preferCity = false;
+          S._focus = cg;
+          S._focusStuck = 0;
+          return cg;
+        }
+        S._preferCity = false;
+      }
 
       var it = generalPlayer.entries();
       for (var e = it.next(); !e.done; e = it.next()) {
