@@ -133,8 +133,12 @@
       if (owner[from] !== pid) return false;
       if (!isPassable(owner, to)) return false;
       var a = armies[from];
-      if (a - 1 <= armies[to]) return false; // 必须严格大于守军
-      armies[to] = a - 1 - armies[to];
+      if (a < 2) return false;
+      var own = owner[to] === pid;
+      // 往自己的格子并兵永远合法（只损耗 1），往敌人格必须打得过
+      if (!own && a - 1 <= armies[to]) return false;
+      var sent = a - 1;
+      armies[to] = own ? sent + armies[to] : sent - armies[to];
       armies[from] = 0;
       owner[to] = pid;
       used.add(from);
@@ -206,7 +210,9 @@
       if (!advance(target, reach)) break;
     }
 
-    // D. 输兵：找不到任何可吃目标时，朝目标推最厚的堆
+    // D. 输兵：C 吃不动之后，用分层最大流把后排兵力往各个缺口送（flow.js）
+    if (moves.length < budget) transport();
+    // 连缺口都没有（前线被山挡死之类）时退回单目标推土机
     if (moves.length === 0) conveyor();
 
     function computeReach(n, nbr, owner, armies, pid) {
@@ -310,6 +316,28 @@
         moved = true;
       }
       return moved;
+    }
+
+    function transport() {
+      if (!GB.flow) return;
+      var goal = pickGoal();
+      var base = {
+        n: n,
+        nbr: nbr,
+        owner: owner,
+        armies: armies,
+        pid: pid,
+        budget: budget,
+        myGeneral: myGeneral,
+        moves: function () {
+          return moves;
+        },
+        move: move
+      };
+      // 先集中打一个目标；集中模式下没有可流的兵（比如贴不上那个目标）再看全图
+      var res = GB.flow.plan(Object.assign({}, base, { focus: goal }));
+      if (!res.moves.length) res = GB.flow.plan(Object.assign({}, base, { focus: -1 }));
+      if (res.moves.length) reasons.push('flow:' + res.stats.flow + '/' + res.stats.demand);
     }
 
     // 目标：敌将 > 最近的敌方地块 > 最远的可探索格

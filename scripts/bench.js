@@ -63,7 +63,8 @@ for (let turn = 0; turn < TURNS; turn++) {
   const moves = GB.bot.plan(S, { maxMoves: 6 });
   totalMoves += moves.length;
   for (const [from, to] of moves) {
-    S.armies[to] = S.armies[from] - 1 - S.armies[to];
+    const a = S.armies[from];
+    S.armies[to] = S.terrain[to] === 0 ? a - 1 + S.armies[to] : a - 1 - S.armies[to];
     S.armies[from] = 0;
     S.terrain[to] = 0;
   }

@@ -11,7 +11,7 @@
       "matches": ["https://generals.io/*"],
       "run_at": "document_start",
       "world": "MAIN",
-      "js": ["src/state.js", "src/bot.js", "src/hook.js"]
+      "js": ["src/state.js", "src/flow.js", "src/bot.js", "src/hook.js"]
     },
     {
       "matches": ["https://generals.io/*"],

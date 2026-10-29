@@ -6,6 +6,7 @@
 
 global.window = global;
 require('../src/state.js');
+require('../src/flow.js');
 require('../src/bot.js');
 
 const assert = require('node:assert/strict');
@@ -79,10 +80,13 @@ function validate(S, moves) {
     assert.ok(from >= 0 && from < S.n && to >= 0 && to < S.n, '越界');
     assert.equal(own[from], S.playerIndex, '从非我方格出兵: ' + from);
     assert.ok(!used.has(from), '同一格动了两次: ' + from);
-    assert.ok(armies[from] - 1 > armies[to], '兵力不足: ' + from + '>' + to);
+    assert.ok(armies[from] >= 2, '一格兵不能动: ' + from);
     assert.notEqual(own[to], GB.TILE.MOUNTAIN, '打进山里');
+    const merge = own[to] === S.playerIndex;
+    // 并兵永远合法；打别人的格子才要求打得过
+    if (!merge) assert.ok(armies[from] - 1 > armies[to], '兵力不足: ' + from + '>' + to);
     used.add(from);
-    armies[to] = armies[from] - 1 - armies[to];
+    armies[to] = merge ? armies[from] - 1 + armies[to] : armies[from] - 1 - armies[to];
     armies[from] = 0;
     own[to] = S.playerIndex;
   }
