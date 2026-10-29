@@ -1,10 +1,10 @@
 {
   "name": "generals-autopilot-edge",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "description": "generals.io 自动决策/自动移动的 Edge 扩展",
   "scripts": {
-    "test": "node test/bot.test.js && node test/flow.test.js",
+    "test": "node test/bot.test.js && node test/flow.test.js && node test/state.test.js",
     "e2e": "node scripts/e2e-check.js && node scripts/e2e-pipeline.js",
     "pk": "node scripts/pk-report.js",
     "smoke": "node scripts/refbots/smoke.js",

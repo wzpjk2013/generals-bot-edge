@@ -56,11 +56,21 @@ const INJECT = `
     window.__GB.feed(name, payload);
   }
 
+  // 照服务器的真实形状喂：
+  //   game_start  **不带 map**（服务器只发 playerIndex / usernames / teams / game_type / options）
+  //   game_update 带 map_diff，首帧按 delta() 的约定就是全量编码 [0, len, ...]
+  // 以前这里图省事直接往 game_start 塞 map，正好把「首帧 diff 拼不出图」这个 bug 盖住了。
   fire('game_start', {
-    playerIndex: 0, generals: [9, 54], cities: [], usernames: ['bot', 'enemy'],
-    map: map.slice(), game_type: 'custom', options: { modifiers: [] }, teams: []
+    playerIndex: 0, playerColors: [0, 1], usernames: ['bot', 'enemy'],
+    teams: [0, 1], game_type: 'custom', options: { modifiers: [] }
   });
-  fire('game_update', { turn: 1, map: map.slice(), generals: [9, 54], scores: [] });
+  fire('game_update', {
+    turn: 1,
+    map_diff: [0, map.length].concat(map),
+    generals: [9, 54],
+    cities_diff: [0, 0],
+    scores: []
+  });
 
   return {
     ok: true,
@@ -68,6 +78,7 @@ const INJECT = `
     emitted: sent,
     ready: window.__GB.state.ready,
     online: window.__GB.state.n,
+    badDiff: window.__GB.state.badDiff,
     origEmit: typeof orig
   };
 })()
@@ -89,8 +100,8 @@ const FFA_CASE = `
   armies[9] = 10; terrain[9] = 0;
   const map = [w, h].concat(armies, terrain);
   const fire = (name, p) => window.__GB.feed(name, p);
-  fire('game_start', { playerIndex: 0, generals: [9], cities: [], usernames: ['bot'], map: map.slice(), game_type: 'ffa' });
-  fire('game_update', { turn: 50, map: map.slice() });
+  fire('game_start', { playerIndex: 0, playerColors: [0], usernames: ['bot'], teams: [0], game_type: 'ffa' });
+  fire('game_update', { turn: 50, map_diff: [0, map.length].concat(map) });
   return { emitted: sent, blocked: window.__GB.state.gameType };
 })()
 `;

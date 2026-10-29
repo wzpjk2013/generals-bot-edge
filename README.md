@@ -59,8 +59,22 @@ node scripts/bump-version.js --check  # 只校验两边一致
    [w, h, armies(0..n-1), terrain(0..n-1), tunnelLimits(0..n-1)]
    ```
 
-   首帧全量，之后 `map_diff` / `cities_diff` 是增量，编码为成对的
-   `(相同个数, 变化个数, ...变化值)`，和官方 `delta()/patch()` 完全一致，`src/state.js` 复刻了一份。
+   **`game_start` 里没有 `map`**，服务器只发
+   `{playerIndex, playerColors, replay_id, usernames, teams, game_type, options, deserts, swamps, lights, …}`。
+   地图只出现在 `game_update` 的 `map_diff` 里，而首帧的 diff 按 `delta()` 的约定**本身就是全量**：
+
+   ```js
+   y.delta = function (t, e) { if (!t || t.length !== e.length) return [0, e.length].concat(e); … }
+   ```
+
+   之后每帧才是相对上一帧的增量，编码为成对的 `(相同个数, 变化个数, ...变化值)`，
+   和官方 `delta()/patch()` 一致，`src/state.js` 复刻了一份。
+
+   > 这一条是踩出来的：之前 `applyUpdate` 写成「有 base 才 patch」，首帧 `raw` 是 null 就把包丢掉，
+   > 之后每帧都是相对上一帧的增量，**永远拼不出第一张图**。真机表现是面板
+   > 「事件 174 / 决策 0 / 状态未开局」——包全收到了，一回合都没决策。
+   > `test/state.test.js` 把这条钉住了；`scripts/e2e-pipeline.js` 也改成按服务器的真实形状喂数据
+   > （以前图省事直接往 `game_start` 里塞 `map`，正好把这个 bug 盖住）。
 
 terrain：`-1` 空地、`-2` 山、`-3` 迷雾、`-4` 雾中山、`-5` 瞭望塔、`-6` 观测站，`>= 0` 是玩家下标；
 `generals[p]` 是玩家 p 的将军格（只在视野内有效）。

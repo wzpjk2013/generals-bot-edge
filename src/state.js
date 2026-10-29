@@ -25,14 +25,25 @@
   /**
    * 还原 generals.io 的增量数组编码。
    * diff = [same0, changed0, v..., same1, changed1, v..., ...]
+   *
+   * old 允许为空。服务器发的是
+   *   t.map_diff = a.delta(n.last_map, d)
+   * 而 delta 的约定是：
+   *   y.delta = function (t, e) { if (!t || t.length !== e.length) return [0, e.length].concat(e); ... }
+   * 也就是**第一帧的 diff 本身就是全量编码**：game_start 里根本没有 map
+   * （服务器是 t.emit("game_start", {playerIndex, usernames, teams, game_type, options, ...})）。
+   *
+   * 所以 old 为空时必须按「空数组」去 patch，别把它当坏包丢掉——丢一包就永远 ready 不了，
+   * 面板上表现为「事件一直在涨、决策一直是 0、状态停在未开局」。
    */
   function patchArray(old, diff) {
-    if (!old || !diff) return null;
+    if (!diff || !diff.length) return null;
+    var base = old || [];
     var out = [];
     var r = 0;
     while (r < diff.length) {
       var same = diff[r] | 0;
-      for (var k = 0; k < same; k++) out.push(old[out.length]);
+      for (var k = 0; k < same; k++) out.push(base[out.length]);
       r += 1;
       if (r < diff.length && diff[r]) {
         var changed = diff[r] | 0;
@@ -66,6 +77,7 @@
     this.gameType = '';
     this.raw = null; // 完整串行化地图，增量还原要用
     this.rawCities = null;
+    this.badDiff = 0; // 收到但解不开的增量包数量（正常必须一直是 0）
     this._nbr = null;
     this.lastEvent = 0;
   };
@@ -115,16 +127,20 @@
 
     if (Array.isArray(msg.map)) {
       this.setRaw(msg.map.slice());
-    } else if (Array.isArray(msg.map_diff) && this.raw) {
+    } else if (Array.isArray(msg.map_diff)) {
+      // 首帧没有 base（game_start 不带 map），patchArray 按空数组处理全量编码
       var next = patchArray(this.raw, msg.map_diff);
-      if (!next || !(next[0] > 0)) return;
+      if (!next || !(next[0] > 0)) {
+        this.badDiff = (this.badDiff || 0) + 1;
+        return;
+      }
       this.setRaw(next);
     }
 
     if (Array.isArray(msg.cities)) {
       this.cities = msg.cities.slice();
       this.rawCities = this.cities.slice();
-    } else if (Array.isArray(msg.cities_diff) && this.rawCities) {
+    } else if (Array.isArray(msg.cities_diff)) {
       var cities = patchArray(this.rawCities, msg.cities_diff);
       if (cities) {
         this.cities = cities;
