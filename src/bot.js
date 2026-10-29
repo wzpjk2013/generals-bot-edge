@@ -233,9 +233,75 @@
      * 我们」的空格（正好塞进缺口），同分再挑离家近的。
      */
     var doBlob = C.blob !== false;
+    /*
+     * 扩地优先 + 城市闸门 + 禁止回头。
+     *
+     * 回放 WWyoWgLmt（我们 88 地 / 对面 149，兵 560 / 对面 1317，t=609 被吃掉）：
+     *   - 591 手走子里 398 手（67%）是往自家格子推。兵在自己家里一格一格搬，
+     *     地一格没多；
+     *   - focus 一看见「打得动的城」就锁死在那儿，整盘兵一格一格喂进去；
+     *   - 后院 303 个兵整局没挪窝，前线只有 257，对面前线 457。
+     *
+     * 地的唯一用处是产能：每格每 50 tick +1 兵，将军和城是每 2 tick +1。
+     * 一回合只有一手时，吃格子的收益是立刻到账的，搬兵的收益要再走 N 手才兑现，
+     * 所以吃的优先级必须高于搬；城要「攒够余量 + 没格子可吃」才买。
+     *
+     * 禁止回头：上一步 a→b，这一步又 b→a，两回合净收益 0，兵还各留 1 个在原地。
+     * focus 每回合重挑时这种情况会成串出现（regret 里 (10,0)→(10,1) 连下 30 多手）。
+     *
+     * 「扩地优先」实测是负收益，默认关闭（expand=true 可开）：
+     *   40 种子 × 80 局/对手，迷雾：
+     *     对手       关（当前）  开
+     *     gc          63.7%     41.3%
+     *     zlyv21      56.3%     17.5%
+     *     szly        45.0%     11.3%
+     *     kutu        31.3%      3.8%
+     * 原因是「吃格子」和「攒一拳头」抢同一条命令，而每方每回合只有 1 步。
+     * supply() 的前锋推（dist==1）本来就是在扩地——只是它用**同一条主纵队**
+     * 扩，兵是聚着的；expandStep 是「哪堆厚就从哪堆抽 1 个出去」，全图铺开，
+     * 主纵队永远攒不起来，一开打就被对面一拳打穿。
+     */
+    var doExpand = C.expand === true;
+    /*
+     * 前锋吃不动时「就近吃空格」默认关闭。
+     *
+     * 镜像 A/B 里它是赢的（60 种子 120 局，已分胜负里 63.6%，地盘 116 : 60），
+     * 但打参考 bot 是输的：40 种子 × 2 对手，gc 58.8% / zlyv21 38.8%（基线
+     * 63.7% / 56.3%）。同样的净效应——地多了（142 : 83）兵也多了（1251 : 698），
+     * 胜率却掉。参考 bot 是会集中兵力来砸的，全图摊开吃格子的打法守不住。
+     * 现在改由 focusNear（目标太远就吃手边的）来解决同一个问题，主纵队不掉头。
+     */
+    var expandStuck = C.expandStuck === true;
+    /*
+     * rail 排序默认还是「从厚到薄」，不是「从前沿往后倒灌」。
+     *
+     * 倒灌版本（railFront=true）镜像 A/B 输得很难看，40 种子 80 局：
+     *   候选（从前沿倒灌）vs 基线（从厚到薄）  胜 3 / 负 64 / 和 13，
+     *   已分胜负里只有 4.5%，地盘 66.6 vs 183.3。
+     * 原因：dist 最小的那格通常就是刚推出去、被抽干的前锋（1~2 兵），先搬它
+     * 等于每回合往同一格灌 1 个兵，后面那堆厚的永远不动，纵队彻底断供。
+     */
+    var railFront = C.railFront === true;
+    var cityGate = C.cityGate !== false;
+    var cityMaxDist = C.cityMaxDist === undefined ? 12 : C.cityMaxDist | 0;
+    // 近在眼前的城优先买（8 步内），远城不追——隧道比城本身还贵
+    var cityNear = C.cityNear === undefined ? 8 : C.cityNear | 0;
+    // focus 离我们超过这么多步，就改吃手边的空格（见 pickFocus 末尾的注释）
+    var focusNear = C.focusNear === undefined ? 8 : C.focusNear | 0;
+    /*
+     * 回头路守卫默认关闭。
+     *
+     * 目标只有「上一步的逆向不走」一条：a→b 之后不许 b→a。它确实挡住了
+     * 「两回合净收益 0、两边各留 1 兵」的摆动，但实测挡的常常是正经的回头补位
+     * （把兵调回来打穿后方的入侵者、将军后撤），代价比收益大：
+     * 40 种子 gc/zlyv21 各 80 局，antiReverse 单独开是 52.5% / 62.5%（基线
+     * 63.7% / 56.3%），合计 57.5% : 60.0%。而同一局的 regret 里，自家格走子
+     * 占比几乎没动（29.4% → 29.3%）。留着开关，别默认开。
+     */
+    var antiReverse = C.antiReverse === true;
 
     // 本回合各类出子的计数，擂台会把它们累加，用来看「自家来回搬」占多少。
-    var STATS = { attack: 0, rail: 0, merge: 0 };
+    var STATS = { attack: 0, rail: 0, merge: 0, spread: 0 };
     GB.lastStats = STATS;
 
     // 阶段：0 早期 / 1 中期 / 2 后期（将军封存）
@@ -424,6 +490,8 @@
       var a = armies[from];
       if (a < 2) return false;
       var own = owner[to] === pid;
+      // 回头路：上一步 a→b，这一步 b→a。两个回合净收益 0，还各在起点留 1 兵。
+      if (antiReverse && S._prevKeys && S._prevKeys.indexOf(from + '>' + to) >= 0) return false;
       /*
        * 往自家格子并兵，只挪 1 个兵是纯浪费。
        *
@@ -481,6 +549,7 @@
       if (sent < 1) return false;
       // 往自己的格子并兵永远合法（只损耗 1），往敌人格必须打得过
       if (!own && sent <= armies[to]) return false;
+      var wasNeutral = owner[to] < 0;
       armies[to] = own ? sent + armies[to] : sent - armies[to];
       armies[from] = a - sent;
       owner[to] = pid;
@@ -489,6 +558,8 @@
       if (own) {
         STATS.rail++;
         if (armies[to] - sent >= 2) STATS.merge++;
+      } else if (wasNeutral) {
+        STATS.spread++;
       } else {
         STATS.attack++;
       }
@@ -644,18 +715,22 @@
     //    同时最多维持两条战线，为地盘四处开花等于把兵摊成每格 1 的薄片。
     var focus = -1;
     if (!alarmed) {
-      focus = pickFocus();
-      if (focus >= 0) {
-        if (!supply(focus)) {
-          S._focusStuck = (S._focusStuck | 0) + 1;
-          // 卡十几回合说明正面啃不动，换目标，别死磕一个啃不动的格
-          if (S._focusStuck > 12) {
-            S._focus = -1;
+      // C1. 扩地：一回合只有一手，先吃贴着我们地盘的格子（见 doExpand 的注释）
+      var spilled = doExpand ? expandStep() : false;
+      if (!spilled) {
+        focus = pickFocus();
+        if (focus >= 0) {
+          if (!supply(focus)) {
+            S._focusStuck = (S._focusStuck | 0) + 1;
+            // 卡十几回合说明正面啃不动，换目标，别死磕一个啃不动的格
+            if (S._focusStuck > 12) {
+              S._focus = -1;
+              S._focusStuck = 0;
+              S._preferCity = true;
+            }
+          } else {
             S._focusStuck = 0;
-            S._preferCity = true;
           }
-        } else {
-          S._focusStuck = 0;
         }
       }
     }
@@ -821,8 +896,14 @@
       }
       var best = -1;
       var bd = Infinity;
+      // 和主路径同一个闸门：打完必须留本钱，太远的不去
+      var maxOur = 0;
+      for (i = 0; i < n; i++) {
+        if (owner[i] === pid && armies[i] > maxOur) maxOur = armies[i];
+      }
       for (i = 0; i < n; i++) {
         if (!isCity[i] || owner[i] === pid || dist[i] < 0) continue;
+        if (cityGate && maxOur < armies[i] * 2 + 6) continue;
         if (dist[i] < bd) {
           bd = dist[i];
           best = i;
@@ -872,6 +953,56 @@
         return ni;
       }
       return -1;
+    }
+
+    /*
+     * 扩地：这一手能吃的空格里，挑最划算的那一格吃掉。
+     *
+     * 打分（落点 j，出兵格 i）：
+     *   +2 × j 周围有几面是我们的地     —— 塞缺口：三面贴我们的空格吃下去不产生新周长，
+     *                                    贴着敌人那面也短，不容易被对面拿它当我们视野的洞
+     *   +0.6 × 出兵格剩的兵            —— 用厚堆出兵，剩下的兵不会卡成 1
+     *   -0.3 × 落点到将军的曼哈顿距离   —— 离家近的格子，后面运兵便宜
+     *   +1   已知空格（TILE_EMPTY）优先于雾格（可能真是山，走进去白丢一手）
+     *   -2 出兵格只有 2 兵              —— 送 1 兵出去就把它卡成 1 兵的死格
+     *
+     * 将军要攒到 genSend 才动它（唯一的稳定兵源，见 GEN_WEIGHT 的注释）。
+     */
+    function expandStep() {
+      var bestTo = -1;
+      var bestSrc = -1;
+      var bestScore = -Infinity;
+      var gx = myGeneral >= 0 ? myGeneral % SW : -1;
+      var gy = myGeneral >= 0 ? (myGeneral / SW) | 0 : -1;
+      for (var i = 0; i < n; i++) {
+        if (owner[i] !== pid || used.has(i)) continue;
+        var a = armies[i];
+        if (a < 2) continue;
+        if (i === myGeneral && a < genSend) continue;
+        var nb = nbr[i];
+        for (var k = 0; k < nb.length; k++) {
+          var j = nb[k];
+          if (owner[j] >= 0) continue; // 只看空/雾；敌方和我方都不算扩地
+          if (!isPassable(owner, j)) continue;
+          var nbj = nbr[j];
+          var ownN = 0;
+          for (var m = 0; m < nbj.length; m++) {
+            if (owner[nbj[m]] === pid) ownN++;
+          }
+          var score = ownN * 2 + 0.6 * a;
+          if (gx >= 0) score -= 0.3 * (Math.abs((j % SW) - gx) + Math.abs(((j / SW) | 0) - gy));
+          if (owner[j] === T.EMPTY) score += 1;
+          // 雾里可能是山，也可能正对着一支敌人；已知空格永远先吃
+          if (a < 3) score -= 2;
+          if (score > bestScore) {
+            bestScore = score;
+            bestTo = j;
+            bestSrc = i;
+          }
+        }
+      }
+      if (bestTo < 0) return false;
+      return move(bestSrc, bestTo, 'expand');
     }
 
     /* 块状扩张的落点：贴着我们的地盘、最好几面都是我们的、离家别太远 */
@@ -1017,22 +1148,39 @@
         for (i = 0; i < n; i++) {
           if (owner[i] === pid && armies[i] > maxOur) maxOur = armies[i];
         }
+        /*
+         * 城：近的、打得动的，才买。
+         *
+         * 产能上城是「每 2 tick +1 兵」，一格地是「每 50 tick +1 兵」——一座城
+         * 等于 25 格地的进项，所以只要能便宜拿下就必须拿。不划算的是**跑远路**
+         * 去拿：一手命令只能走一格，8 步外的城要先在自家地里铺 8 手隧道
+         * （回放 WWyoWgLmt 的 67% 自家格走子就是这些隧道）。
+         *
+         * 所以两条闸门：
+         *   - 打得动且打完剩本钱：手里最厚的一堆 >= 守军 × 2 + 6；
+         *   - 够得着：8 步以内。远城不追，等推到旁边再说。
+         * 两条都满足才排在扩地前面；否则先吃手边的空格。
+         */
+        var maxOur = 0;
+        for (i = 0; i < n; i++) {
+          if (owner[i] === pid && armies[i] > maxOur) maxOur = armies[i];
+        }
         var cityBest = -1;
         var cd = Infinity;
-        for (i = 0; i < n; i++) {
-          if (!isCity[i] || owner[i] === pid || dist[i] < 0) continue;
-          if (armies[i] + 1 > maxOur) continue; // 打不动，别把兵喂进去
-          if (dist[i] < cd) {
-            cd = dist[i];
-            cityBest = i;
+        if (cityGate || doBlob) {
+          for (i = 0; i < n; i++) {
+            if (!isCity[i] || owner[i] === pid || dist[i] < 0) continue;
+            if (armies[i] + 1 > maxOur) continue; // 打不动，别把兵喂进去
+            if (cityGate && maxOur < armies[i] * 2 + 6) continue; // 打完剩不下本钱
+            if (dist[i] > cityNear) continue; // 远城不追，见注释
+            if (dist[i] < cd) {
+              cd = dist[i];
+              cityBest = i;
+            }
           }
         }
-        if (cityBest >= 0) {
-          best = cityBest;
-        } else if (doBlob) {
-          // 块状：吃掉贴着我们的那一圈里最「内凹」的空格，别拉成长条
-          best = blobTarget(dist);
-        }
+        if (cityBest >= 0) best = cityBest;
+        else if (doBlob) best = blobTarget(dist);
         if (best < 0) {
           // 最近的未探索格（FOG）。全视野局没有 FOG，自动退化成「最远的可通行格」。
           // 试过反过来取最远的那块（让纵队直线插进地图深处找人），结果和取最近
@@ -1062,6 +1210,21 @@
             best = far;
           }
         }
+      }
+      /*
+       * 目标太远就换成一个贴边的空格。
+       *
+       * 一手命令只能把一堆兵往前挪一格。目标在 15 步开外时，supply() 的
+       * 「前锋」够不着目标（dist==1 的格子在那边，我们还没打过去），每一手
+       * 都落进 rail 的隧道逻辑：把兵沿链在自家地里挪一格。搬十手换不来一格地，
+       * 回放 WWyoWgLmt 的 67% 自家格走子就是这么来的。
+       *
+       * 远处的目标（城、记忆里的敌格、黑区）留着，等推到近处再打：现在先吃
+       * 手边的空格——同样是 1 个兵换 1 格，而且主纵队不用掉头。
+       */
+      if (doBlob && best >= 0 && dist[best] > focusNear) {
+        var nearT = blobTarget(dist);
+        if (nearT >= 0) best = nearT;
       }
       S._focus = best;
       S._focusStuck = 0;
@@ -1165,7 +1328,21 @@
         if (move(front[f], fstep, 'push')) return true;
       }
 
-      // 2. 集兵：后方一堆往前搬一格，优先并到已经有兵的格子上
+      /*
+       * 2. 前锋吃不动时，先吃身边能吃的空格，别沿着通往远处目标的链在自家
+       *    格子里一格一格搬。
+       *
+       * 这是「自家搬 67%」的真正来源：focus 往往是远处的一座城或一片黑，
+       * dist==1 的前锋根本够不着它，于是每一手都在 rail 里把兵沿链往目标方向
+       * 挪一格——而那一格还是我们自己的地。搬十手换不来一格地。
+       *
+       * 换成「就近吃一格」之后，同一手命令换来 +1 地（每格每 50 tick +1 兵，
+       * 是永久产能），而不是让兵在自家地里多走一步。只有在真的没空格可吃
+       * （被山和敌人围住）时，才退回去沿链搬兵。
+       */
+      if (expandStuck && expandStep()) return true;
+
+      // 3. 集兵：后方一堆往前搬一格，优先并到已经有兵的格子上
       var railScore = new Map();
       var railStep = new Map();
       for (var r = 0; r < rail.length; r++) {
@@ -1185,7 +1362,16 @@
         railScore.set(ridx, armies[ridx] * weight(ridx) * bonus);
         railStep.set(ridx, rstep);
       }
+      /*
+       * 从前沿往后倒灌，不是从后往前推。
+       *
+       * 原来按兵数从厚到薄搬：搬的是全图最厚的那堆，而它往往在后方。它挪一格
+       * 只是在自己家里挪，前沿那几个兵原地不动——一局一半的命令花在自家格子里
+       * （regret 实测 67%）。按 dist 从近到远排，紧贴前沿的那堆先并进去，下一回合
+       * 才轮到它后面那堆，前沿每回合净增一层兵，才能真的啃下东西。
+       */
       rail.sort(function (a, b) {
+        if (railFront && dist[a] !== dist[b]) return dist[a] - dist[b];
         return (railScore.get(b) || 0) - (railScore.get(a) || 0);
       });
       for (var g = 0; g < rail.length; g++) {
@@ -1331,6 +1517,9 @@
     }
 
     GB.lastReasons = reasons;
+    // 记下本回合下发的逆向 key，下一回合不许原路走回来（见 move() 的 antiReverse）
+    S._prevKeys = [];
+    for (var mk = 0; mk < moves.length; mk++) S._prevKeys.push(moves[mk][1] + '>' + moves[mk][0]);
     return moves;
   }
 

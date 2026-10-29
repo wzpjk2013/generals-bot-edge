@@ -104,11 +104,13 @@ async function main() {
   let planIntoOwn = 0;
   let realMoves = 0;
   const streaks = [];
+  const kinds = {};
+  const kindsOwn = {};
   let curStreak = { key: '', n: 0 };
   const samples = [];
   const armySnap = [];
 
-  const cfg = { maxMoves: 1 };
+  const cfg = Object.assign({ maxMoves: 1 }, process.env.GB_CFG ? JSON.parse(process.env.GB_CFG) : {});
 
   simulate(R, (t, snap) => {
     if (snap.terrain[snap.generals[pid]] !== pid && snap.gen[pid] < 0) return;
@@ -135,6 +137,10 @@ async function main() {
     const pv = plan[0];
     if (pv) {
       planned++;
+      const why = (GB.lastReasons && GB.lastReasons[0]) || '?';
+      const kind = why.split(':')[0];
+      kinds[kind] = (kinds[kind] || 0) + 1;
+      if (snap.terrain[pv[1]] === pid) kindsOwn[kind] = (kindsOwn[kind] || 0) + 1;
       // 真值校验：源格在这一 tick 前属于我们、且兵 >= 2
       if (!(snap.terrain[pv[0]] === pid && snap.armies[pv[0]] >= 2)) planDead++;
       if (snap.terrain[pv[1]] === pid) planIntoOwn++;
@@ -222,6 +228,13 @@ async function main() {
   console.log('  引擎这步推进自家格    ' + planIntoOwn + ' 手 = ' + pct(planIntoOwn, planned) + '   ← 兵在自家来回搬');
 
   streaks.sort((a, b) => b.n - a.n);
+  console.log('\n引擎决策构成（走子类型 / 其中推进自家格）：');
+  for (const k of Object.keys(kinds).sort((a, b) => kinds[b] - kinds[a])) {
+    console.log(
+      '  ' + k.padEnd(10) + String(kinds[k]).padStart(5) + ' 手 = ' + pct(kinds[k], planned).padStart(6) +
+        '   推进自家格 ' + String(kindsOwn[k] || 0).padStart(4) + ' 手'
+    );
+  }
   if (streaks.length) {
     console.log('\n最长「同一手反复下」：');
     for (const s of streaks.slice(0, 5)) {

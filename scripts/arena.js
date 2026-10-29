@@ -308,7 +308,7 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
   let winner = -1;
   let turns = 0;
   let idleTurns = 0; // 我们整回合一条命令都没出：引擎空转的回合数
-  const stats = { attack: 0, rail: 0, merge: 0 }; // 出子构成：打出去的 / 自家格子之间搬的
+  const stats = { attack: 0, rail: 0, merge: 0, spread: 0 }; // 出子构成：打 / 自家搬 / 占地
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     turns = turn + 1;
@@ -358,6 +358,7 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
           stats.attack += GB.lastStats.attack;
           stats.rail += GB.lastStats.rail;
           stats.merge += GB.lastStats.merge;
+          stats.spread += GB.lastStats.spread || 0;
         }
         if (!moves.length) idleTurns++;
         if (trace) {
@@ -437,6 +438,7 @@ function runCell(opponent, ourBudget, refBudget, seeds, engineCfg, opts) {
     idleTurns: 0,
     rail: 0,
     attack: 0,
+    spread: 0,
     skipped: 0
   };
   for (let s = 0; s < seeds; s++) {
@@ -453,6 +455,7 @@ function runCell(opponent, ourBudget, refBudget, seeds, engineCfg, opts) {
       if (r.stats) {
         acc.rail += r.stats.rail;
         acc.attack += r.stats.attack;
+        acc.spread += r.stats.spread || 0;
       }
       acc.ourLand += r.ourLand;
       acc.enemyLand += r.enemyLand;
@@ -497,7 +500,8 @@ function show(label, acc) {
       pad((acc.enemyLand / g).toFixed(0), 9) +
       pad((acc.ourArmy / g).toFixed(0), 9) +
       pad((acc.enemyArmy / g).toFixed(0), 9) +
-      pad(acc.rail + acc.attack ? ((acc.rail / (acc.rail + acc.attack)) * 100).toFixed(0) + '%' : '-', 7)
+      pad(acc.rail + acc.attack + acc.spread ? ((acc.rail / (acc.rail + acc.attack + acc.spread)) * 100).toFixed(0) + '%' : '-', 7) +
+      pad(acc.rail + acc.attack + acc.spread ? ((acc.spread / (acc.rail + acc.attack + acc.spread)) * 100).toFixed(0) + '%' : '-', 7)
   );
 }
 
@@ -515,7 +519,8 @@ function header() {
       pad('对方地', 8) +
       pad('我方兵', 8) +
       pad('对方兵', 8) +
-      pad('自家搬', 7)
+      pad('自家搬', 7) +
+      pad('占地', 7)
   );
 }
 
