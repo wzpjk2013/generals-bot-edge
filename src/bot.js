@@ -574,7 +574,7 @@
           queue.push(j);
         }
       }
-      if (threatArmy < 0 || bestDelta <= armies[myGeneral]) return false;
+      if (threatArmy < 0 || bestDelta < armies[myGeneral]) return false;
 
       var limit = budget;
       while (moves.length < limit) {
