@@ -24,6 +24,7 @@
 
   var CHAIN_MAX = 4; // 单回合沿一条路径最多推几步
   var GARRISON = 4; // 将军保底兵力（低于此值优先不动将军）
+  var POKE_MARGIN = 4; // 进攻敌方地块时，出兵堆要比「打穿代价」多出这么多才动手
 
   function isPassable(terrain, i) {
     var t = terrain[i];
@@ -202,8 +203,11 @@
       }
     }
 
+    // B2. 预警：视野内最厚的敌军在 8 步内且比将军厚，先把附近的兵并进将军
+    var alarmed = defendWarn();
+
     // C. 扩张：反复求最便宜的“值得吃”的目标，链式推进
-    while (moves.length < budget) {
+    while (!alarmed && moves.length < budget) {
       var reach = computeReach(n, nbr, owner, armies, pid);
       var target = pickTarget(n, nbr, owner, armies, reach, pid, myGeneral, isCity, generalPlayer);
       if (!target) break;
@@ -265,6 +269,8 @@
         var s = reach.src[i];
         if (s < 0) continue;
         if (armies[s] < c) continue; // 兵力不够，别白送
+        // 打敌方地块要先攒够余量：拿 2 个兵去戳一下只是给对方送兵
+        if (owner[i] >= 0 && armies[s] < c + POKE_MARGIN) continue;
 
         var value;
         if (isCity[i]) value = 6;
@@ -318,9 +324,64 @@
       return moved;
     }
 
+    /*
+     * 预警守将：从将军往外 BFS 最多 8 步，找视野内最厚的敌军。
+     * 比将军厚就把将军 3 步内最厚的几堆兵往回并；并完还挡不住就返回 true，
+     * 这一回合不再往外撒兵（PK 里被 hunter 的蛇打穿就是这么丢的将军）。
+     */
+    function defendWarn() {
+      if (myGeneral < 0 || owner[myGeneral] !== pid) return false;
+      var dist = new Int32Array(n).fill(-1);
+      var queue = [myGeneral];
+      var i;
+      dist[myGeneral] = 0;
+      var threatArmy = -1;
+      for (var h = 0; h < queue.length; h++) {
+        var cur = queue[h];
+        if (dist[cur] >= 12) continue;
+        if (cur !== myGeneral && owner[cur] >= 0 && owner[cur] !== pid) {
+          if (armies[cur] > threatArmy) threatArmy = armies[cur];
+          continue;
+        }
+        var list = nbr[cur];
+        for (var k = 0; k < list.length; k++) {
+          var j = list[k];
+          if (dist[j] !== -1 || !isPassable(owner, j)) continue;
+          dist[j] = dist[cur] + 1;
+          queue.push(j);
+        }
+      }
+      if (threatArmy <= armies[myGeneral]) return false;
+
+      var limit = budget;
+      while (moves.length < limit) {
+        var bestSrc = -1;
+        var bestA = 1;
+        for (i = 0; i < n; i++) {
+          if (owner[i] !== pid || used.has(i) || i === myGeneral) continue;
+          if (dist[i] < 1 || dist[i] > 5) continue;
+          if (armies[i] > bestA) {
+            bestA = armies[i];
+            bestSrc = i;
+          }
+        }
+        if (bestSrc < 0) break;
+        var step = -1;
+        var nb = nbr[bestSrc];
+        for (var k2 = 0; k2 < nb.length; k2++) {
+          var j2 = nb[k2];
+          if (dist[j2] === dist[bestSrc] - 1) {
+            step = j2;
+            break;
+          }
+        }
+        if (step < 0 || !move(bestSrc, step, 'alert')) break;
+      }
+      return armies[myGeneral] < threatArmy;
+    }
+
     function transport() {
-      if (!GB.flow) return;
-      var goal = pickGoal();
+      if (!GB.flow) return;      var goal = pickGoal();
       var base = {
         n: n,
         nbr: nbr,
