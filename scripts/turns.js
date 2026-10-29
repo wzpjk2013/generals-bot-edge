@@ -110,6 +110,8 @@ async function main() {
   const pid = process.argv[3] !== undefined && !process.argv[3].startsWith('--') ? Number(process.argv[3]) : 0;
   const showAll = process.argv.includes('--all');
   const real = process.argv.includes('--real');
+  // 单变量对照：GB_CFG='{"noBackstep":false}' node scripts/turns.js <id> 1
+  const cfgExtra = process.env.GB_CFG ? JSON.parse(process.env.GB_CFG) : {};
   if (!idOrPath) {
     console.error('用法: node scripts/turns.js <回放ID 或 .gior> [我方下标] [--all]');
     process.exit(2);
@@ -143,7 +145,7 @@ async function main() {
     const denemy = enemyField(snap, pid);
     let plan = [];
     try {
-      plan = GB.bot.plan(S, { maxMoves: 1 }) || [];
+      plan = GB.bot.plan(S, Object.assign({ maxMoves: 1 }, cfgExtra)) || [];
     } catch (e) {
       lines.push({ t, text: 'plan 抛异常 ' + ((e && e.message) || e) });
       return;
@@ -171,14 +173,14 @@ async function main() {
       if (!realMove) {
         total++;
         cat['空过'] = (cat['空过'] || 0) + 1;
-        lines.push({ t, text: '空过（这一手什么都没下）', kind: '空过', waste: true, land: ownLand, army: ownArmy });
+        lines.push({ t, text: '空过（这一手什么都没下）', kind: '空过', waste: true, dbg: GB.dbg, land: ownLand, army: ownArmy });
         return;
       }
       plan = [[realMove.start, realMove.end, realMove.is50 ? 1 : 0]];
     } else if (!plan.length) {
       total++;
       cat['空过'] = (cat['空过'] || 0) + 1;
-      lines.push({ t, text: '空过（这一手什么都没下）', kind: '空过', waste: true, land: ownLand, army: ownArmy });
+      lines.push({ t, text: '空过（这一手什么都没下）', kind: '空过', waste: true, dbg: GB.dbg, land: ownLand, army: ownArmy });
       return;
     }
 
@@ -257,6 +259,7 @@ async function main() {
         ' 离敌 ' + (denemy[from] < 0 ? '∞' : denemy[from]) + '→' + (denemy[to] < 0 ? '∞' : denemy[to]) +
         ' [' + why + ']' +
         (note ? '   ← ' + note : ''),
+      dbg: GB.dbg,
       land: ownLand,
       army: ownArmy
     });
@@ -282,7 +285,9 @@ async function main() {
     if (!showAll && !l.waste) continue;
     console.log(
       '  t=' + String(l.t).padStart(4) + '  ' + String(l.kind).padEnd(10) + l.text +
-        (l.dbg && showAll ? '  [前锋' + l.dbg.front + ' 后送' + l.dbg.rail + ' 目标离敌' + l.dbg.gEnemy + ']' : '') +
+        (l.dbg && showAll ? '  [阶段' + l.dbg.phase + ' 门槛' + l.dbg.genSend + ' 将兵' + l.dbg.genArmy +
+          ' 目标' + l.dbg.focus + ' 前锋' + l.dbg.front + ' 后送' + l.dbg.rail + ' 出子' + l.dbg.moves +
+          ' 调用' + (l.dbg.calls || []).join(' ') + ']' : '') +
         (l.land !== undefined ? '   地' + l.land + ' 兵' + l.army : '')
     );
   }

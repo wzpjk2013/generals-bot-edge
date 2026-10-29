@@ -282,8 +282,17 @@
      * 等于每回合往同一格灌 1 个兵，后面那堆厚的永远不动，纵队彻底断供。
      */
     var railFront = C.railFront === true;
-    // 别往后倒兵（见 supply 里的白搬闸门）
-    var noBackstep = C.noBackstep !== false;
+    /*
+     * 别往后倒兵：默认关闭。
+     *
+     * 1.1.7 默认开过一版，用户拿回放 _ZP2mPnew 说「这个版本发癫了」——量出来的
+     * 就是这个开关：同一局里空过 13 手 → 47 手，占地 85 手 → 42 手，t=80..121
+     * 整整四十多手一步没下（地停在 23 格），因为闸门把主纵队的会合全挡了。
+     * 判定条件是「能看见敌格 + 这一步离敌更远 + 目标格 < 4 兵」，而打起来之后
+     * 大部分会合都满足前两条——「离敌更远」在包围、绕山、往另一条战线调兵时
+     * 都是正常操作，不是白搬。
+     */
+    var noBackstep = C.noBackstep === true;
     var cityGate = C.cityGate !== false;
     var cityMaxDist = C.cityMaxDist === undefined ? 12 : C.cityMaxDist | 0;
     // 近在眼前的城优先买（8 步内），远城不追——隧道比城本身还贵
@@ -305,6 +314,7 @@
     // 本回合各类出子的计数，擂台会把它们累加，用来看「自家来回搬」占多少。
     var STATS = { attack: 0, rail: 0, merge: 0, spread: 0 };
     GB.lastStats = STATS;
+    var DBG = (GB.dbg = {});
 
     // 阶段：0 早期 / 1 中期 / 2 后期（将军封存）
     var tick = S.turn | 0;
@@ -1026,6 +1036,20 @@
       var bestScore = -Infinity;
       var gx = myGeneral >= 0 ? myGeneral % SW : -1;
       var gy = myGeneral >= 0 ? ((myGeneral / SW) | 0) : -1;
+      /*
+       * 打不动的格子不能当目标。
+       *
+       * 中立格是带兵的（回放里常见 8~12 个），迷雾里只有站到旁边才看得见。
+       * 以前 blobTarget 只看「贴着我们 + 几面是我们的」，不看那一格有多少兵：
+       * 一旦它挑中一个 12 兵的敌方小堡，supply 的前锋就永远推不动（move() 里
+       * 「送出去的兵必须比守军多」），而 stuck 计数每 12 手重挑一次还是挑回同一格——
+       * 整局就那么空转。回放 _ZP2mPnew 里我们空过 109 手（32.4%）就是这么来的：
+       * 将军 t=0..30 一直憋着，直到别的方向凑出能打的兵才动。
+       */
+      var maxOur = 0;
+      for (var mi = 0; mi < n; mi++) {
+        if (owner[mi] === pid && armies[mi] > maxOur) maxOur = armies[mi];
+      }
       // 目标要黏：每回合换一个边上的落点，兵就在前沿来回搬（第一版实测过，
       // 155→156→155 这种一步三回头）。
       var last = S._focus;
@@ -1034,6 +1058,7 @@
       for (var i = 0; i < n; i++) {
         if (owner[i] === pid || dist[i] !== 1) continue;
         if (!isPassable(owner, i)) continue;
+        if (armies[i] + 1 >= maxOur) continue; // 打不动，换一个落点
         var nb = nbr[i];
         var own = 0;
         for (var k = 0; k < nb.length; k++) if (owner[nb[k]] === pid) own++;
@@ -1325,6 +1350,11 @@
         // 将军的兵要打点折扣：它是唯一兵源，抽空了后面就补不上。
         return idx === myGeneral ? genWeight : 1;
       }
+      DBG.front = front.length;
+      DBG.rail = rail.length;
+      // 每次 supply 调用一行：目标[前锋,后送,将军到目标几步]
+      DBG.calls = DBG.calls || [];
+      DBG.calls.push(goal + '[f' + front.length + ',r' + rail.length + ',d' + (myGeneral >= 0 ? dist[myGeneral] : -9) + ']');
 
       // 1. 前锋：紧贴目标，兵最多的先推
       front.sort(function (a, b) {
@@ -1551,6 +1581,13 @@
     }
 
     GB.lastReasons = reasons;
+    DBG.phase = phase;
+    DBG.genSend = genSend;
+    DBG.genArmy = myGeneral >= 0 ? armies[myGeneral] : -1;
+    DBG.moves = moves.length;
+    DBG.front = DBG.front || 0;
+    DBG.rail = DBG.rail || 0;
+    DBG.focus = S._focus;
     // 记下本回合下发的逆向 key，下一回合不许原路走回来（见 move() 的 antiReverse）
     S._prevKeys = [];
     for (var mk = 0; mk < moves.length; mk++) S._prevKeys.push(moves[mk][1] + '>' + moves[mk][0]);
