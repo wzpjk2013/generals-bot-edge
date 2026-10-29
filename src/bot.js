@@ -1,4 +1,4 @@
-/*
+﻿/*
  * 决策引擎。
  *
  * 参考实现（同一套 generals.io 状态机，不同宿主）：
@@ -582,7 +582,7 @@
         var bestA = 1;
         for (i = 0; i < n; i++) {
           if (owner[i] !== pid || used.has(i) || i === myGeneral) continue;
-          if (dist[i] < 1 || dist[i] > 5) continue;
+          if (dist[i] < 1 || dist[i] > 8) continue;
           if (armies[i] > bestA) {
             bestA = armies[i];
             bestSrc = i;
@@ -675,3 +675,4 @@
 
   GB.bot = { plan: plan, neighbors: neighbors, isPassable: isPassable };
 })();
+
