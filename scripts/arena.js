@@ -308,6 +308,7 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
   let winner = -1;
   let turns = 0;
   let idleTurns = 0; // 我们整回合一条命令都没出：引擎空转的回合数
+  const stats = { attack: 0, rail: 0, merge: 0 }; // 出子构成：打出去的 / 自家格子之间搬的
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     turns = turn + 1;
@@ -353,11 +354,20 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
         const baseCfg = p === oursSide ? engineCfg : (opts && opts.cfg2) || engineCfg;
         const enginePlan = Object.assign({}, baseCfg, { maxMoves: ourBudget });
         const moves = GB.bot.plan(states[p], enginePlan);
+        if (p === oursSide && GB.lastStats) {
+          stats.attack += GB.lastStats.attack;
+          stats.rail += GB.lastStats.rail;
+          stats.merge += GB.lastStats.merge;
+        }
         if (!moves.length) idleTurns++;
         if (trace) {
+          const mv = moves[0];
+          const arm = (i) => (i >= 0 ? board.armies[i] : 0);
           console.log(
-            'T' + turn + ' 我方 gen=' + board.generals[oursSide] + ' 兵=' + board.armies[board.generals[oursSide]] +
-            ' 走=' + JSON.stringify(moves)
+            'T' + turn + ' 我方 地' + landCount(board, oursSide) + ' 兵' + armyCount(board, oursSide) +
+            ' 将兵' + arm(board.generals[oursSide]) +
+            ' 走' + (mv ? mv[0] + '→' + mv[1] + '(' + arm(mv[0]) + (board.owner[mv[1]] === oursSide ? '并' : board.owner[mv[1]] < 0 ? '占' : '打') + ')' : '空过') +
+            ' [' + Object.keys(GB.lastStats || {}).map((k) => k + '=' + GB.lastStats[k]).join(' ') + ']'
           );
         }
         for (const m of moves) {
@@ -400,6 +410,7 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
     winner,
     turns,
     idleTurns,
+    stats,
     ourLand: landCount(board, oursSide),
     enemyLand: landCount(board, 1 - oursSide),
     ourArmy: armyCount(board, oursSide),
@@ -424,6 +435,8 @@ function runCell(opponent, ourBudget, refBudget, seeds, engineCfg, opts) {
     ourArmy: 0,
     enemyArmy: 0,
     idleTurns: 0,
+    rail: 0,
+    attack: 0,
     skipped: 0
   };
   for (let s = 0; s < seeds; s++) {
@@ -437,6 +450,10 @@ function runCell(opponent, ourBudget, refBudget, seeds, engineCfg, opts) {
       acc.games++;
       acc.turns += r.turns;
       acc.idleTurns += r.idleTurns;
+      if (r.stats) {
+        acc.rail += r.stats.rail;
+        acc.attack += r.stats.attack;
+      }
       acc.ourLand += r.ourLand;
       acc.enemyLand += r.enemyLand;
       acc.ourArmy += r.ourArmy;
@@ -479,7 +496,8 @@ function show(label, acc) {
       pad((acc.ourLand / g).toFixed(0), 8) +
       pad((acc.enemyLand / g).toFixed(0), 9) +
       pad((acc.ourArmy / g).toFixed(0), 9) +
-      pad((acc.enemyArmy / g).toFixed(0), 9)
+      pad((acc.enemyArmy / g).toFixed(0), 9) +
+      pad(acc.rail + acc.attack ? ((acc.rail / (acc.rail + acc.attack)) * 100).toFixed(0) + '%' : '-', 7)
   );
 }
 
@@ -496,7 +514,8 @@ function header() {
       pad('我方地', 7) +
       pad('对方地', 8) +
       pad('我方兵', 8) +
-      pad('对方兵', 8)
+      pad('对方兵', 8) +
+      pad('自家搬', 7)
   );
 }
 

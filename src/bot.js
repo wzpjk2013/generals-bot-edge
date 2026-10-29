@@ -209,6 +209,34 @@
     var doHarvest = C.harvest === true;
     var genSendMin = C.genSendMin === undefined ? GENERAL_SEND_MIN : C.genSendMin | 0;
     var genWeight = C.genWeight === undefined ? GEN_WEIGHT : Number(C.genWeight);
+    // 集兵：后方的一堆往前搬一格、跟前面的堆并上，而不是每格轮流送 1 个兵。
+    // 关掉它就退回旧行为（任何 >=2 的堆都能往自家格子挪），专门用来做单变量对照。
+    var doGather = C.gather !== false;
+    /*
+     * 将军坐家：将军只往自家格子送兵，不亲自出门占格子。
+     *
+     * 将军每回合 +1，是全图唯一稳定的兵源；它亲自往外出，等于把兵源一格一格挪到
+     * 前线，身后留一条 1 兵的尾巴（回放 Fk12pNja_ 开局那条 (6,5)→(7,5)→(8,5)
+     * 就是这么留下的，每格 1 兵，后面还得花回合把尾巴并回来）。
+     * 坐家只留一件事：往外送兵。兵堆自己走。
+     */
+    var genAnchor = C.genAnchor === true;
+    /*
+     * 长成块，不拉成蛇。
+     *
+     * 将军是**固定格**（bundle 里 Map.attack 从不改 generals[]，兵走了那格只剩 1 兵），
+     * 所以兵源永远在家里，前沿离家的距离就是兵的运输成本。沿一个方向一路推出去，
+     * 地盘是条蛇：离家 10 格的前沿，每送一批兵就要 10 个回合在路上——回放 Fk12pNja_
+     * 开局就是这么走的，(6,5) 一波一波往东送，每一波都得把整条蛇再走一遍。
+     *
+     * 块状扩张把「前沿到家」的距离压在 sqrt(地盘) 量级：优先吃那种「几面都贴着
+     * 我们」的空格（正好塞进缺口），同分再挑离家近的。
+     */
+    var doBlob = C.blob !== false;
+
+    // 本回合各类出子的计数，擂台会把它们累加，用来看「自家来回搬」占多少。
+    var STATS = { attack: 0, rail: 0, merge: 0 };
+    GB.lastStats = STATS;
 
     // 阶段：0 早期 / 1 中期 / 2 后期（将军封存）
     var tick = S.turn | 0;
@@ -396,7 +424,20 @@
       var a = armies[from];
       if (a < 2) return false;
       var own = owner[to] === pid;
+      /*
+       * 往自家格子并兵，只挪 1 个兵是纯浪费。
+       *
+       * 1 兵格里剩下的那个兵自己动不了，等于兵永远卡在半路；回放 Fk12pNja_ 里
+       * 开局那段 (6,5)→(7,5)→(8,5)→(9,5) 每格留 1 兵，就是引擎每回合把「最重
+       * 的那堆」沿旧路往前挪一格挪出来的——那 6 手的源格全是 1 兵，服务器全部丢掉，
+       * 六个回合一个格子都没多。
+       *
+       * 内部搬运必须挪得动一堆：源格至少 3 个兵（送出去至少 2 个）。
+       */
+      if (own && a < 3 && doGather) return false;
       var genOut = from === myGeneral && to !== myGeneral;
+      // 将军坐家：只往自家格子送兵，不亲自出去占地
+      if (genOut && genAnchor && !own) return false;
       // 将军隔壁已经有敌人时，只允许直接打它。把将军的兵送去别的方向等于自杀：
       // 将军被吃得手整局就结束，前面攒多少都没用。
       if (genOut && !(owner[to] >= 0 && owner[to] !== pid)) {
@@ -445,6 +486,12 @@
       owner[to] = pid;
       used.add(from);
       moves.push([from, to, half ? 1 : 0]);
+      if (own) {
+        STATS.rail++;
+        if (armies[to] - sent >= 2) STATS.merge++;
+      } else {
+        STATS.attack++;
+      }
       if (why) reasons.push(why + ':' + from + '>' + to);
       return true;
     }
@@ -827,16 +874,48 @@
       return -1;
     }
 
+    /* 块状扩张的落点：贴着我们的地盘、最好几面都是我们的、离家别太远 */
+    function blobTarget(dist) {
+      var best = -1;
+      var bestScore = -Infinity;
+      var gx = myGeneral >= 0 ? myGeneral % SW : -1;
+      var gy = myGeneral >= 0 ? ((myGeneral / SW) | 0) : -1;
+      // 目标要黏：每回合换一个边上的落点，兵就在前沿来回搬（第一版实测过，
+      // 155→156→155 这种一步三回头）。
+      var last = S._focus;
+      var lx = last >= 0 ? last % SW : -1;
+      var ly = last >= 0 ? ((last / SW) | 0) : -1;
+      for (var i = 0; i < n; i++) {
+        if (owner[i] === pid || dist[i] !== 1) continue;
+        if (!isPassable(owner, i)) continue;
+        var nb = nbr[i];
+        var own = 0;
+        for (var k = 0; k < nb.length; k++) if (owner[nb[k]] === pid) own++;
+        // 三面是墙、一面是我们的空格最值（塞缺口），一字排开的最不值
+        var score = own * 3;
+        if (gx >= 0) score -= 0.35 * (Math.abs((i % SW) - gx) + Math.abs(((i / SW) | 0) - gy));
+        if (lx >= 0) score -= 1.2 * (Math.abs((i % SW) - lx) + Math.abs(((i / SW) | 0) - ly));
+        if (isCity[i] && owner[i] < 0) score += 1.5;
+        if (score > bestScore) {
+          bestScore = score;
+          best = i;
+        }
+      }
+      return best;
+    }
+
     function pickFocus() {
       var prev = S._focus;
       if (prev >= 0 && prev < n) {
         if (owner[prev] !== pid) return prev;
-        // 拿下了：沿原方向再推一格，别重选
-        var nxt = extendFocus(prev);
-        if (nxt >= 0) {
-          S._focus = nxt;
-          S._focusStuck = 0;
-          return nxt;
+        // 块状模式下不沿原方向续推（那就是蛇），改由下面重挑一个贴边的空格
+        if (!doBlob) {
+          var nxt = extendFocus(prev);
+          if (nxt >= 0) {
+            S._focus = nxt;
+            S._focusStuck = 0;
+            return nxt;
+          }
         }
       }
 
@@ -950,7 +1029,11 @@
         }
         if (cityBest >= 0) {
           best = cityBest;
-        } else {
+        } else if (doBlob) {
+          // 块状：吃掉贴着我们的那一圈里最「内凹」的空格，别拉成长条
+          best = blobTarget(dist);
+        }
+        if (best < 0) {
           // 最近的未探索格（FOG）。全视野局没有 FOG，自动退化成「最远的可通行格」。
           // 试过反过来取最远的那块（让纵队直线插进地图深处找人），结果和取最近
           // 逐局相同——focus 是粘性的，这个 fallback 一局里只走一两次，取哪块
@@ -1012,7 +1095,21 @@
           queue.push(j);
         }
       }
-      var cand = [];
+      /*
+       * 分两档挑源格：贴目标的「前锋」先推，推不动再从后方「集兵」。
+       *
+       * 原来只有一档：全图按兵数排序，最重的一堆往目标挪一格。问题在最重的那堆
+       * 往往在后方——它挪一格只是在自己地盘里挪，而前锋那几个兵原地不动，于是
+       * 一局里一半的命令都花在自家格子上（regret.js 实测 49.2%）。
+       *
+       * 现在的规矩：
+       *   1. 前锋（dist==1）优先：能直接吃到目标就吃，兵最多的先上。
+       *   2. 吃不动就把后方的一堆往前搬一格，但源格必须 >=3 兵（见 move() 里的
+       *      内部搬运门槛），而且要优先并到已经有兵的前锋堆上——那样下一回合
+       *      前锋才有厚度推出去。
+       */
+      var front = [];
+      var rail = [];
       for (var i = 0; i < n; i++) {
         if (owner[i] !== pid || used.has(i) || armies[i] < 2 || dist[i] <= 0) continue;
         if (i === myGeneral) {
@@ -1042,27 +1139,61 @@
             if (!canStep) continue;
           }
         }
-        cand.push(i);
+        if (dist[i] === 1) front.push(i);
+        else rail.push(i);
       }
-      cand.sort(function (a, b) {
+
+      function weight(idx) {
         // 将军的兵要打点折扣：它是唯一兵源，抽空了后面就补不上。
-        var wa = a === myGeneral ? genWeight : 1;
-        var wb = b === myGeneral ? genWeight : 1;
-        return armies[b] * wb - armies[a] * wa;
+        return idx === myGeneral ? genWeight : 1;
+      }
+
+      // 1. 前锋：紧贴目标，兵最多的先推
+      front.sort(function (a, b) {
+        return armies[b] * weight(b) - armies[a] * weight(a);
       });
-      for (var o = 0; o < cand.length; o++) {
-        var from = cand[o];
-        var step = -1;
-        var nb = nbr[from];
-        for (var k2 = 0; k2 < nb.length; k2++) {
-          var j2 = nb[k2];
-          if (dist[j2] === dist[from] - 1 && isPassable(owner, j2)) {
-            step = j2;
+      for (var f = 0; f < front.length; f++) {
+        var fstep = -1;
+        var fnb = nbr[front[f]];
+        for (var fk = 0; fk < fnb.length; fk++) {
+          if (dist[fnb[fk]] === 0) {
+            fstep = fnb[fk];
             break;
           }
         }
-        if (step < 0) continue;
-        if (move(from, step, 'push')) return true;
+        if (fstep < 0) continue;
+        if (move(front[f], fstep, 'push')) return true;
+      }
+
+      // 2. 集兵：后方一堆往前搬一格，优先并到已经有兵的格子上
+      var railScore = new Map();
+      var railStep = new Map();
+      for (var r = 0; r < rail.length; r++) {
+        var ridx = rail[r];
+        var rstep = -1;
+        var rnb = nbr[ridx];
+        for (var rk = 0; rk < rnb.length; rk++) {
+          var rj = rnb[rk];
+          if (dist[rj] === dist[ridx] - 1 && isPassable(owner, rj)) {
+            rstep = rj;
+            break;
+          }
+        }
+        if (rstep < 0) continue;
+        // 并到已有的堆上比铺一个新 1 兵格值：那个堆下一回合就能继续往前挪。
+        var bonus = owner[rstep] === pid && armies[rstep] >= 2 ? 1.6 : 1;
+        railScore.set(ridx, armies[ridx] * weight(ridx) * bonus);
+        railStep.set(ridx, rstep);
+      }
+      rail.sort(function (a, b) {
+        return (railScore.get(b) || 0) - (railScore.get(a) || 0);
+      });
+      for (var g = 0; g < rail.length; g++) {
+        var gidx = rail[g];
+        if (armies[gidx] < 3) continue; // 内部搬运门槛，见 move()
+        var gstep = railStep.get(gidx);
+        if (gstep === undefined) continue;
+        if (move(gidx, gstep, 'gather')) return true;
       }
       return false;
     }

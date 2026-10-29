@@ -46,15 +46,42 @@
     lastEv: '-',  // 最近一个事件名
     dec: 0,       // 引擎给出决策的次数
     snd: 0,       // 成功 emit 出去的条数
+    miss: 0,      // 下发了但服务器没吃（下一帧看不到效果）
+    gap: 0,       // 漏掉的帧：服务器 turn 跳号，增量基线会因此对不上
     pid: -1       // 服务器告诉我们的玩家下标
   };
   var lastDrive = { turn: -1, at: 0 };
+  // 上一手下发的记录，用来核对服务器吃没吃
+  var pending = null;
+  var lastTurnSeen = -1;
   // 第 4 个参数是官方前端的 attackIndex（单调递增序号），不是 turn。
   // 服务端只做 Math.max 推进，所以本地自增即可。
   var attackSeq = 0;
   var socketRef = null;
   var ui = null;
   var version = '';
+
+  /*
+   * 核对上一手：服务器到底吃了没有？
+   *
+   * 这不是洁癖。回放 Fk12pNja_ 我方 848 手里有 460 手在真值下根本不成立（源格是
+   * 空地/敌方地盘 356 手、源格只剩 1 兵 104 手），也就是说一半的命令是白扔的。
+   * 原因分两截：一半能从引擎侧堵掉（见 bot.js 里的内部搬运门槛），另一半只能
+   * 靠「下发了但没生效」这个计数暴露出来——本地图和服务器图对不上时它就会涨。
+   *
+   * 判据取最保守的那种：源格兵没少、目标格也没变成我们的，就算没吃。
+   */
+  function verifyPending() {
+    if (!pending || !state.ready) return;
+    var S = state;
+    if (S.turn <= pending.turn) return; // 还没走到下一帧
+    var p = pending;
+    pending = null;
+    var srcNow = p.from >= 0 && p.from < S.n ? S.armies[p.from] : 0;
+    var dstOurs = p.to >= 0 && p.to < S.n && S.terrain[p.to] === S.playerIndex;
+    if (srcNow < p.src || (!p.dstWasOurs && dstOurs)) return; // 生效了
+    stats.miss += 1;
+  }
 
   function log() {
     var args = Array.prototype.slice.call(arguments);
@@ -85,6 +112,8 @@
     if (now - lastDrive.at < 100) return;
     lastDrive.turn = S.turn;
     lastDrive.at = now;
+    // 上一手到底吃没吃？必须在算这一手之前核对，否则错了也看不出来。
+    verifyPending();
 
     var moves;
     try {
@@ -104,6 +133,9 @@
     try {
       socketRef.emit('attack', mv[0], mv[1], !!mv[2], attackSeq++);
       stats.snd += 1;
+      // 记下这一手，下一帧回来核对服务器到底吃没吃。核对不到就是本地账和服务器
+      // 对不上（回放 Fk12pNja_ 里我方 848 手有 460 手其实没生效），面板上会显示。
+      pending = { turn: S.turn, from: mv[0], to: mv[1], src: S.armies[mv[0]], dstWasOurs: S.terrain[mv[1]] === S.playerIndex };
     } catch (e) {
       stats.error = 'emit: ' + ((e && e.message) || e);
     }
@@ -127,6 +159,13 @@
       stats.error = '';
     },
     game_update: function (m) {
+      // 服务器每个半回合发一帧，turn 也是每帧 +1。跳号 = 我们漏了帧，而增量地图
+      // 是按位置叠的：漏一帧之后所有后续 map_diff 都会叠错位置，本地图就烂了。
+      var t2 = m && Number.isInteger(m.turn) ? m.turn : -1;
+      if (t2 >= 0) {
+        if (lastTurnSeen >= 0 && t2 > lastTurnSeen + 1) stats.gap += t2 - lastTurnSeen - 1;
+        lastTurnSeen = t2;
+      }
       state.applyUpdate(m);
       drive();
     },
@@ -298,6 +337,7 @@
     '    <div class="sep"></div>',
     '    <div class="row"><span class="k">每半回合步数</span><input id="in-max" type="number" min="1" max="2" step="1" title="服务器每个半回合只执行 1 条，显示回合 = 2 个半回合，上限 2"></div>',
     '    <div class="row"><span class="k">事件 / 决策 / 下发</span><span class="v" id="st6">0 / 0 / 0</span></div>',
+    '    <div class="row"><span class="k">没生效 / 丢帧</span><span class="v" id="st7">0 / 0</span></div>',
     '  </div>',
     '</div>'
   ].join('');
@@ -471,6 +511,7 @@
       st3: el(root, 'st3'),
       st5: el(root, 'st5'),
       st6: el(root, 'st6'),
+      st7: el(root, 'st7'),
       body: el(root, 'body'),
       fold: el(root, 'fold'),
       folded: false
@@ -550,6 +591,11 @@
       }
       ui.st6.textContent = stats.ev + ' / ' + stats.dec + ' / ' + stats.snd;
       ui.st6.title = '事件 / 引擎给出决策 / 成功下发。事件一直 0 是订阅问题；事件在涨但没有决策是引擎问题';
+      ui.st7.textContent = stats.miss + ' / ' + stats.gap;
+      ui.st7.className = 'v' + (stats.miss + stats.gap > 0 ? ' warn' : '');
+      ui.st7.title =
+        '没生效 = 下发了但下一帧看不到效果（本地图和服务器对不上，这手白扔）；' +
+        '丢帧 = 服务器 turn 跳号，增量地图会因此叠错位置。两个数都应该是 0，涨起来就说明状态在漂';
       ui.st5.textContent = stats.last;
     } catch (e) {
       try {

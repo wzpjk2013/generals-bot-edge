@@ -3,3 +3,7 @@ _research/
 *.log
 .DS_Store
 Thumbs.db
+
+# ÀŞÌ¨ÁÙÊ±Êä³ö
+_arena_*.txt
+_msg.txt

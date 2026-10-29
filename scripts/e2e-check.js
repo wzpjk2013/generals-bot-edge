@@ -50,6 +50,7 @@ const manifestVersion = JSON.parse(fs.readFileSync(path.join(EXT, 'manifest.json
     report.version = await evaluate(cdp, panel('ver'));
     report.status = await evaluate(cdp, panel('st'));
     report.turn = await evaluate(cdp, panel('st2'));
+    report.verify = await evaluate(cdp, panel('st7'));
     report.state = await evaluate(
       cdp,
       'window.__GB && window.__GB.state ? ({ready: window.__GB.state.ready, pid: window.__GB.state.playerIndex, n: window.__GB.state.n}) : null'
@@ -133,6 +134,9 @@ const manifestVersion = JSON.parse(fs.readFileSync(path.join(EXT, 'manifest.json
       problems.push('版本号应为 v' + manifestVersion + '，实际 ' + JSON.stringify(report.version) + '（扩展没重载？）');
     }
     if (report.status !== '未开局') problems.push('没开局时状态应是「未开局」，实际 ' + JSON.stringify(report.status));
+    if (report.verify !== '0 / 0') {
+      problems.push('「没生效 / 丢帧」开局应显示 0 / 0，实际 ' + JSON.stringify(report.verify));
+    }
     if (report.trap === 'miss') problems.push('socket 陷阱没命中');
     if (report.drag && !report.drag.moved) problems.push('面板拖不动：拖动后位置没变 ' + JSON.stringify(report.drag));
     if (report.drag && report.drag.accidentallyFolded) problems.push('拖动把面板折起来了（点击/拖动没有分开）');

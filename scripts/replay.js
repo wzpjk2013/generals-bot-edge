@@ -82,7 +82,11 @@ function buildBoard(R) {
   return { n, terrain, armies };
 }
 
-function simulate(R) {
+/*
+ * hook(t, snap) 在每 tick 应用走子**之前**调用，snap 是那一刻的真实局面。
+ * regret.js 用它把「服务器视角的真值」逐帧喂给引擎，重置一局离线对局。
+ */
+function simulate(R, hook) {
   const { n, terrain, armies } = buildBoard(R);
   const isCity = new Set(R.cities);
   const gen = R.generals.slice();
@@ -115,6 +119,22 @@ function simulate(R) {
 
   for (let t = 0; t <= out.lastTurn; t++) {
     const list = byTurn.get(t);
+    if (hook) {
+      hook(t, {
+        n,
+        w: R.w,
+        h: R.h,
+        terrain,
+        armies,
+        gen,
+        isCity,
+        alive,
+        cities: R.cities,
+        generals: R.generals,
+        usernames: R.usernames,
+        movesThisTurn: list || []
+      });
+    }
     if (list) {
       list.sort((a, b) => a.player - b.player);
       for (const m of list) {
@@ -131,18 +151,30 @@ function simulate(R) {
         }
         const wasGen = gen[m.player] === m.start;
         const victimP = genOf.has(m.end) && genOf.get(m.end) !== m.player ? genOf.get(m.end) : -1;
+        /*
+         * 将军**不会**跟着兵走。
+         *
+         * bundle 里 `Map.attack` 只动 _armies/_map，一个字都没碰 generals[]：
+         *   同一方：_armies[e] += l
+         *   不同方：打穿则 _armies[e] = l - _armies[e] 并 setTile(e, 我方)
+         * 两条路都没改 this.generals。generals[] 只在被吃、交换、复活、
+         * Leapfrog 模式下才变。也就是说将军那一格永远在原地，兵走了只剩 1 兵。
+         *
+         * 之前这里写了 gen[player] = end，等于把「将军」当成棋子。后果很硬：
+         * 将军离家之后那一格不再产兵，后面所有「从将军格出兵」的手全被算成
+         * 空过/非法，凭空造出 54% 的假死手。
+         */
         if (terrain[m.end] === m.player) {
           armies[m.end] += sent;
           armies[m.start] = left;
-          if (wasGen) gen[m.player] = m.end;
         } else if (sent > armies[m.end]) {
           armies[m.end] = sent - armies[m.end];
           terrain[m.end] = m.player;
           armies[m.start] = left;
-          if (wasGen) gen[m.player] = m.end;
           if (victimP >= 0 && alive[victimP]) {
             alive[victimP] = false;
             out.deaths[victimP] = t;
+            gen[victimP] = -1;
           }
         } else {
           armies[m.end] -= sent;
@@ -240,19 +272,27 @@ function report(R, sim, ours) {
   }
 }
 
-(async () => {
-  const idOrPath = process.argv[2];
-  const ours = process.argv[3] !== undefined ? Number(process.argv[3]) : -1;
-  if (!idOrPath) {
-    console.error('用法: node scripts/replay.js <回放ID 或 .gior 文件> [我方玩家下标]');
-    process.exit(2);
-  }
+async function load(idOrPath) {
   let buf;
   if (fs.existsSync(idOrPath)) buf = new Uint8Array(fs.readFileSync(idOrPath));
   else buf = (await fetchReplay(idOrPath)).buf;
   const json = decompressFromUint8Array(buf);
   if (!json) throw new Error('解压失败：不是 lz-string 压的回放？');
-  const R = parseReplay(JSON.parse(json));
-  const sim = simulate(R);
-  report(R, sim, ours);
-})();
+  return parseReplay(JSON.parse(json));
+}
+
+module.exports = { load, fetchReplay, parseReplay, buildBoard, simulate, report, EMPTY, MOUNTAIN };
+
+if (require.main === module) {
+  (async () => {
+    const idOrPath = process.argv[2];
+    const ours = process.argv[3] !== undefined ? Number(process.argv[3]) : -1;
+    if (!idOrPath) {
+      console.error('用法: node scripts/replay.js <回放ID 或 .gior 文件> [我方玩家下标]');
+      process.exit(2);
+    }
+    const R = await load(idOrPath);
+    const sim = simulate(R);
+    report(R, sim, ours);
+  })();
+}
