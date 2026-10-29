@@ -12,11 +12,39 @@ generals.io 的浏览器端机器人：读对局状态 → 每个半回合决策
 
 Chrome 同理（`chrome://extensions`）。需要 Chromium 111+：`content_scripts` 用了 `"world": "MAIN"`。
 
+**改了代码必须回来点「重新加载」**，否则页面里跑的还是旧代码。为了一眼能看出来，
+面板标题右边直接显示清单里的版本号（`v1.1.0`）：
+
+| 面板上看到的 | 意思 |
+| --- | --- |
+| 没有版本号 | 隔离世界的 `bridge.js` 没跑起来（`chrome.runtime` 读不到），设置和版本号都传不过来 |
+| 版本号和 `manifest.json` 不一致 | 扩展没重载，跑的是上一版 |
+| 加载解压缩失败 | 通常是 `manifest.json` 是 GBK 乱码 —— 这个仓库踩过三次，别用 PowerShell 的 `Get-Content/Set-Content` 改源码 |
+
+每次改完跑一下版本号（`manifest.json` 和 `package.json` 会一起涨）：
+
+```powershell
+node scripts/bump-version.js          # 1.1.0 -> 1.1.1
+node scripts/bump-version.js minor    # -> 1.2.0
+node scripts/bump-version.js --check  # 只校验两边一致
+```
+
 ## 用
 
 - 进对局就接管：公开匹配、自建房间一视同仁，不需要额外开关。
 - 面板上有总开关、每半回合步数（1–2，默认 1），实时显示回合、地块/兵力、已走步数、最近一次走子。
 - 关掉总开关随时手动接管。
+- **状态行只有四种值**：`未开局`（还没进对局，或者地图还没下发）、`运行中`、`已暂停`、`对局结束`；
+  出错时红字覆盖成具体错误。没有「等待连接 / 等开局」这种含糊说法——
+  究竟是没连上还是没开局，鼠标停在状态行上看 title。
+- **「事件 / 决策 / 下发」三个计数是排障用的**：
+
+  | 现象 | 说明 |
+  | --- | --- |
+  | 事件一直是 0 | 一个对局包都没收到 → socket 陷阱没命中，或协议事件名改了 |
+  | 事件在涨、决策不动 | 包收到了但引擎每回合都返回空 → 引擎问题（看下面的「将军何时出门」） |
+  | 决策在涨、下发不动 | 有动作但 `emit('attack')` 抛异常 → 错误写进状态行 |
+  | 三个都在涨但棋盘不动 | 下发的格子非法被服务器丢了（多半是本地状态和服务器不同步） |
 
 ## 怎么读到对局
 
@@ -98,17 +126,21 @@ src/net/weights.js      参数清单与扁平权重灌入
 test/bot.test.js        决策与状态还原的离线回归（17 条）
 test/flow.test.js       输送器回归（8 条）
 test/net.test.js        网络移植回归（11 条）
-scripts/cdp.js          极简 CDP 驱动（零依赖）
-scripts/e2e-check.js    真机冒烟：扩展加载、socket 捕获、面板挂载
+scripts/cdp.js          极简 CDP 驱动（零依赖；serveStub 可在断网时把首页换成空壳页）
+scripts/e2e-check.js    真机冒烟：扩展加载、面板挂载、版本号、「未开局」、socket 陷阱
 scripts/e2e-pipeline.js 全链路：注入对局 → 机器人下发 attack
 scripts/bench.js        32x32 跑 200 回合的耗时与扩张基准
 scripts/bench-ab.js     推土机 vs 最大流的 A/B
 scripts/bench-net.js    AverageJoe 网络单次前向延迟
-scripts/refagents.js    参考 bot 移植（random / expander / hunter / harvester / ladder）
-scripts/arena.js        与参考 bot 的 1v1 擂台（GB_FOG=1 切真实迷雾）
+scripts/refagents.js    参考 bot 移植（random / expander / hunter / harvester / ladder / gc / szly）
+scripts/refbots/        从 LocalGen-new 源码逐个移植的强对手（放进来就自动注册）
+scripts/refbots/smoke.js 单个移植对手的冒烟：$env:GB_BOT='oim'; node scripts/refbots/smoke.js 20
+scripts/arena.js        与参考 bot 的 1v1 擂台（GB_FOG=0 切全视野，GB_OPP='gc,oim' 只跑指定对手）
 scripts/ab.js           镜像 A/B：同一份代码、不同参数对打，50% 就是没差别
 scripts/mirror.js       引擎打自己，查走子顺序 / 阵营有没有系统性偏差
-scripts/pk-report.js    全对手 PK 报告（Markdown 表格，GB_WRITE=1 写 PK.md）
+scripts/pk-report.js    强对手 PK 报告（Markdown 表格，GB_WRITE=1 写 PK.md，GB_WEAK=1 加弱基线）
+scripts/sweep.js        单变量扫描：对指定对手逐个参数跑，看谁真的动了
+scripts/bump-version.js manifest + package 版本号同步自增（--check 校验）
 PK.md                   最近一次 PK 结果（脚本生成，别手改）
 scripts/idle-stats.js   空转率统计（整回合一条命令都没出的比例）
 scripts/trace-fog.js    单局迷雾 trace（逐回合打印走子）
@@ -124,14 +156,21 @@ node scripts/bench.js        # 单回合决策耗时 + 200 回合扩张率（每
 node scripts/bench-ab.js     # 推土机 vs 最大流：打穿硬骨头的回合数
 node scripts/bench-budget.js # 反事实实验：每回合给 N 条命令会怎样（非真实赛制）
 node scripts/bench-net.js    # AverageJoe 单次前向延迟（L / S 两档）
-node scripts/pk-report.js 40 # 全对手 PK 表（默认迷雾），GB_WRITE=1 写 PK.md
-node scripts/arena.js 40     # 只跑擂台、逐行打印（5 个对手 × 40 种子 × 先后手）
+node scripts/pk-report.js 40 # 强对手 PK 表（默认迷雾），GB_WRITE=1 写 PK.md
+node scripts/arena.js 40     # 只跑擂台、逐行打印（13 个对手 × 40 种子 × 先后手）
 node scripts/ab.js 100       # 镜像 A/B（GB_CFG / GB_CFG2 传参数，PowerShell 里用环境变量最稳）
+node scripts/sweep.js 60 gc,szly,oim  # 单变量扫描
+$env:GB_BOT='oim'; node scripts/refbots/smoke.js 20   # 单个移植对手的冒烟
 GB_FOG=0 node scripts/arena.js 40        # ⚠️ 全视野作弊版，只用于和旧数据对比
 node scripts/idle-stats.js hunter 40   # 空转率：整回合一条命令都没出的比例
 node scripts/e2e-check.js    # 需要本机 Edge，自动起 headless
 node scripts/e2e-pipeline.js # 未打包加载 + 合成对局，断言 attack 参数形状
 ```
+
+`e2e-check` / `e2e-pipeline` 不依赖外网：CDP 的 Fetch 域会把 `https://generals.io/*`
+换成自带的空壳 HTML，页面的 URL 仍然是 `generals.io`，`content_scripts` 照常注入，
+所以扩展注入、面板、版本号、socket 陷阱、下发形状全都能测。
+断网时 `e2e-check` 的输出里 `stubbed: true`。
 
 当前基准（本机，32×32 带山与 12 座城，每回合 1 步 = 真实节拍）：
 
@@ -251,34 +290,58 @@ for (A = 0; A < cities.length; A++) {
 `scripts/arena.js` 起一个 20×20 的 1v1 擂台。对手全部是 GitHub 上开源 bot 的 JS 移植
 （`scripts/refagents.js`）：
 
-| 名字 | 出处 | 说明 |
-| --- | --- | --- |
-| `random` | strakam/generals-bots | 随机合法走子 |
-| `expander` | strakam/generals-bots | 边境能吃的就吃，按兵力加权随机 |
-| `hunter` | strakam/generals-bots | 守将 + 单条纵队推进 + 够得着就斩首 |
-| `harvester` | strakam/generals-bots | hunter + 顺路收编吃得起的中立城 |
-| `ladder` | harrischristiansen/generals-bot | 目标距离折扣 + 守备需求 + 最厚堆评选 |
-| `gc` | **SZXC-WG/LocalGen-new** | GcBot：路线估价 BFS + 随兵力变形的格价值 + 25% 分位探索 + 目标黏性 |
-| `szly` | **SZXC-WG/LocalGen-new** | SzlyBot：块价值图 + 概率「收兵」把后排并上来 |
+| 名字 | 档 | 出处 | 说明 |
+| --- | --- | --- | --- |
+| `gc` | 强 | **SZXC-WG/LocalGen-new** | GcBot：路线估价 BFS + 随兵力变形的格价值 + 25% 分位探索 + 目标黏性 |
+| `szly` | 强 | **SZXC-WG/LocalGen-new** | SzlyBot：块价值图 + 概率「收兵」把后排并上来 |
+| `oim` | 强 | **SZXC-WG/LocalGen-new** | oimBot：记忆推演 + 三档威胁反向 Dijkstra + 逐目标双向评估 |
+| `kutu` | 强 | **SZXC-WG/LocalGen-new** | KutuBot：四张压力/守备图 + 五桶目标候选 + 走廊支援 |
+| `xiaruize` | 强 | **SZXC-WG/LocalGen-new** | XiaRuizeBot：6 个出兵源各建一张带成本的路线图，全局挑最划算的一步 |
+| `zlyv21` | 强 | **SZXC-WG/LocalGen-new** | ZlyBot v2.1：双焦点防守搜索，有模式机（攻击/探索/防守）+ 家区防守 |
+| `ktq` | 弱 | **SZXC-WG/LocalGen-new** | KtqBot：单焦点局部贪心，纯扩张、不设防 |
+| `zlyv3` | 弱 | **SZXC-WG/LocalGen-new** | ZlyBot v3：记忆感知加权搜索，只会往最高价值格全押 |
+| `random` | 弱 | strakam/generals-bots | 随机合法走子 |
+| `expander` | 弱 | strakam/generals-bots | 边境能吃的就吃，按兵力加权随机 |
+| `hunter` | 弱 | strakam/generals-bots | 守将 + 单条纵队推进 + 够得着就斩首 |
+| `harvester` | 弱 | strakam/generals-bots | hunter + 顺路收编吃得起的中立城 |
+| `ladder` | 弱 | harrischristiansen/generals-bot | 目标距离折扣 + 守备需求 + 最厚堆评选 |
 
-后三个是真对手，前四个是陪练：
+**强档才进 PK 合计**，弱档只作「会动的基线」，要跑得显式写 `GB_WEAK=1`——
+它们要么没有迷雾处理（strakam/harris 那五个在迷雾下几乎不动），要么不会护将也不经营
+城市（`ktq` / `zlyv3` 全视野下 100% 输），赢它们不说明任何问题。
 
-- `ladder`（harrischristiansen）按「目标距离 × 折扣」选目标（敌将 ×0.09、城 ×clamp(0.17,
-  守军/(3.2×我方最大堆), 20)、空地 ×4.3、比我们厚的再 ×1.6），再挑最厚的、够得着目标的堆推一格
-- `gc`（LocalGen-new 的 GcBot）不选「目标格」，而是给整张图算**路线估价**：从出兵格 BFS
-  沿路累加（自己格 +army−1、敌格 −army、城 −army/2、没见过的格子 +2），同距离取 eval 高的
-  那条路；格价值 = 类型价值（随兵力变形）+ eval/5 − 距离 − √(40·离将军距离)；探索取
-  「未探索格距离的第 25 百分位」而不是最近那个；有 7% 概率重选出兵格，把后排积压的兵调上来
-- `szly`（LocalGen-new 的 SzlyBot）用块价值图（空白 30 / 城 35 / 障碍 25 / 沼泽 −1000）
-  减距离挑目标，另有一手概率「收兵」：按 `tanh(邻居兵·0.015)` 的概率把邻居并进当前格，
-  而不是自己往前走
+新移植的对手都是 C++ 原版逐行搬过来的，每个一个文件放在 `scripts/refbots/`
+（`scripts/refagents.js` 启动时自动扫描注册，加对手不用改共享文件）。
+各文件头注释写明了被简化/丢弃的分支和原因，自测用：
 
-**这两个把我们打回去了。** 迷雾下 `gc` 48.8%、`szly` 43.8%，而且 `szly` 的终局是
-86 地对 59 地、752 兵对 292 兵——它是靠发育压死我们的，不是靠斩首。
+```powershell
+$env:GB_BOT='oim'; node scripts/refbots/smoke.js 20
+```
+
+几个关键实现差别：
+
+- `gc` 不选「目标格」，而是给整张图算**路线估价**：从出兵格 BFS 沿路累加（自己格 +army−1、
+  敌格 −army、城 −army/2、没见过的格子 +2），同距离取 eval 高的那条路；格价值 = 类型价值
+  （随兵力变形）+ eval/5 − 距离 − √(40·离将军距离)；探索取「未探索格距离的第 25 百分位」
+  而不是最近那个；有 7% 概率重选出兵格，把后排积压的兵调上来
+- `szly` 用块价值图（空白 30 / 城 35 / 障碍 25 / 沼泽 −1000）减距离挑目标，另有一手概率
+  「收兵」：按 `tanh(邻居兵·0.015)` 的概率把邻居并进当前格，而不是自己往前走
+- `oim` 有**真记忆**：看不见的敌方城/将按产兵速率推兵数；威胁是从我方将军/核心城做多源
+  **反向 Dijkstra**，算得出「这股敌人 3 步后到、带 40 兵」；每个候选目标再做一次反向加权
+  Dijkstra 找真实出兵格和拥挤度，乘「兵够了没有」的阈值奖励；将军留兵 / 核心区压力 /
+  咽喉格 / 回撤流四项进守备需求，直接作为硬否决
+- `kutu` 把局面压成四张图（敌方压力 / 我方压力 / 储备兵 / 路径流+核心区+咽喉），
+  三档（4/5/14 步）威胁反向 Dijkstra 选最急那一路，目标候选分五桶（防守/强攻/拿城/施压/探雾）
+  各限额，每个目标再算走廊支援与所需兵力，另有一套经济规划器（5 个最厚堆各做正向 Dijkstra）
+  直接选「目标+首步」
+- `xiaruize` 是**多源并行比价**：6 个出兵源各建一张带成本的路线图，全局比「第一步值不值」，
+  所以找敌将效率高，但节奏慢（平均 373 回合、8.8% 和棋）
+
+**强档把我们打下去了。** 480 局、真实迷雾、6 个强对手，**合计 41.0%**。
 
 规则按真实对局走：每回合 将军 +1 / 城市 +1、每 25 回合全格 +1、**每方每回合 1 步**、
 一格一回合只能动一次、打出去的兵留 1 个在家、吃掉对方将军即胜、1000 回合未分胜负算和。
-每个种子打两局（先后手互换），每格 80 局。
+每个种子打两局（先后手互换），每个对手 80 局。
 
 **走子顺序固定按玩家下标**（`[0, 1]`），和服务器 `getPlayerMovesPriorityV2` 一致。
 之前按「我方先走」排，等于每一局都在让先——后手能看着你先走那一步回应。实测先手方
@@ -286,28 +349,42 @@ for (A = 0; A < cities.length; A++) {
 
 **所有跑分默认都是迷雾**，全视野是作弊版，只有显式写 `GB_FOG=0` 才给。
 
-完整结果在 [`PK.md`](PK.md)（`node scripts/pk-report.js 40` 生成，400 局）：
+完整结果在 [`PK.md`](PK.md)（`node scripts/pk-report.js 40` 生成）：
 
 | 对手 | 局数 | 胜 | 负 | 和 | 胜率 | 平均回合 | 我方地 | 对方地 | 我方兵 | 对方兵 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `random` | 80 | 79 | 0 | 1 | 98.8% | 220 | 98 | 20 | 752 | 262 |
-| `expander` | 80 | 77 | 1 | 2 | 96.3% | 266 | 89 | 60 | 773 | 452 |
-| `hunter` | 80 | 77 | 0 | 3 | 96.3% | 294 | 102 | 7 | 941 | 121 |
-| `harvester` | 80 | 77 | 0 | 3 | 96.3% | 290 | 103 | 7 | 914 | 121 |
-| `ladder` | 80 | 80 | 0 | 0 | 100.0% | 262 | 111 | 6 | 941 | 62 |
-| `gc` | 80 | 39 | 41 | 0 | **48.8%** | 199 | 72 | 71 | 406 | 366 |
-| `szly` | 80 | 35 | 43 | 2 | **43.8%** | 237 | 59 | 86 | 292 | 752 |
-| **合计** | **560** | **464** | **85** | **11** | **82.9%** | | 91 | 37 | 717 | 305 |
+| `gc` | 80 | 40 | 39 | 1 | 50.0% | 202 | 71 | 67 | 427 | 350 |
+| `szly` | 80 | 32 | 48 | 0 | 40.0% | 243 | 57 | 88 | 283 | 707 |
+| `zlyv21` | 80 | 41 | 39 | 0 | 51.2% | 239 | 75 | 69 | 486 | 533 |
+| `xiaruize` | 80 | 42 | 31 | 7 | 52.5% | 373 | 69 | 44 | 696 | 408 |
+| `kutu` | 80 | 24 | 52 | 4 | **30.0%** | 449 | 27 | 119 | 235 | 1512 |
+| `oim` | 80 | 18 | 56 | 6 | **22.5%** | 447 | 32 | 109 | 335 | 1382 |
+| **合计** | **480** | **197** | **265** | **18** | **41.0%** | | 55 | 83 | 410 | 815 |
 
-**前四行不是成绩，是背景噪音。** `random` / `expander` / `hunter` / `harvester` 在迷雾下
-什么都不做：把 FOG 当空地、把看不到的城市当墙、也从不找人；`ladder` 更极端，全视野能赢
-我们 28.7%，一进迷雾就 0:80。真正的对手是 `gc` 和 `szly`——**我们对它们一个是 48.8%、
-一个是 43.8%，也就是打不过。**
+镜像对照 80 局：34 胜 34 负 12 和，已分胜负里 50.0%——同一份代码打自己一半一半，
+说明擂台、先后手、迷雾都没有系统性偏向。
+
+读法：
+
+1. **能打过的是三个「一步一算」型**（`gc` / `zlyv21` / `xiaruize` 都在 50% 上下）。
+   它们的共同点是只看当前这一步的性价比，没有跨回合的记忆和时序。
+2. **打不过的是两个「有记忆 + 有守备」型**（`kutu` 30.0%、`oim` 22.5%），终局是
+   32 地对 109 地、335 兵对 1382 兵——被运营碾了，不是被斩首。
+3. **`szly`（40.0%）输在发育**：88 地对 57 地、707 兵对 283 兵。它靠块价值图一路吃厚，
+   我们的单栈 focus 只看「到目标几步」，不看「这条路值不值」。
+4. 上一轮那 82.9% 是假的：合计里塞了五个在迷雾下几乎不动的对手。**去掉它们就剩 41.0%**，
+   这才是当前引擎的真实水位。
 
 参数层面已经试过了，调不动：`genWeight` 0.75 / 0.5 / 0.2 对 `gc` 是 36.7% / 45.8% / 49.2%，
 对 `szly` 是 34.2% / 41.7% / 40.8%——现默认 0.2 已经是最优。`genSafe`、`genSendMin`、
-`killRatio`、`purge`、`memTtl` 全部落在噪声里。**差距是结构性的**：`szly` 的终局是
-86 地对 59 地、752 兵对 292 兵，它靠发育赢，不靠斩首。
+`killRatio`、`purge`、`memTtl` 全部落在噪声里。**差距是结构性的。**
+
+单变量扫描用这个（对指定对手）：
+
+```powershell
+node scripts/sweep.js 60 gc,szly,oim
+$env:GB_SWEEP='{"genWeight":0.5}'; node scripts/sweep.js 60 oim
+```
 
 ### 镜像 A/B：唯一能证明「变强了」的对照
 
