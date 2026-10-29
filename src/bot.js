@@ -711,11 +711,25 @@
         }
       }
       if (best < 0) {
-        // 没有敌人：先去拿城市（唯一的地盘类兵源），没有城市再往最远处探路
+        /*
+         * 视野里没有敌人。迷雾局里这是常态——服务器按视野过滤，看不见的敌格
+         * 根本不发（generals 里是 -1，map 里是 FOG）。这时候的目标只有两个：
+         *
+         *   1. 城市，但要能打得动。中立城有 40~50 兵，主纵队没攒到 1.5 倍就
+         *      往那儿推，等于把整盘兵一格一格喂给城。这正是迷雾局里我们地盘
+         *      只有对方四分之一的原因：focus 一开局就锁死在最近的城市上。
+         *   2. 最近的未知格。扩张应该朝「边界外的黑」推，不是朝「地图最远
+         *      端」推——后者会绕开身边一大片没探过的地。
+         */
+        var maxOur = 0;
+        for (i = 0; i < n; i++) {
+          if (owner[i] === pid && armies[i] > maxOur) maxOur = armies[i];
+        }
         var cityBest = -1;
         var cd = Infinity;
         for (i = 0; i < n; i++) {
           if (!isCity[i] || owner[i] === pid || dist[i] < 0) continue;
+          if (armies[i] + 1 > maxOur) continue; // 打不动，别把兵喂进去
           if (dist[i] < cd) {
             cd = dist[i];
             cityBest = i;
@@ -724,16 +738,33 @@
         if (cityBest >= 0) {
           best = cityBest;
         } else {
-          var far = -1;
-          var fd = -1;
+          // 最近的未探索格（FOG）。全视野局没有 FOG，自动退化成「最远的可通行格」。
+          // 试过反过来取最远的那块（让纵队直线插进地图深处找人），结果和取最近
+          // 逐局相同——focus 是粘性的，这个 fallback 一局里只走一两次，取哪块
+          // 都由后面的 extendFocus 接管。
+          var fogBest = -1;
+          var fgD = Infinity;
           for (i = 0; i < n; i++) {
-            if (owner[i] === pid || !isPassable(owner, i)) continue;
-            if (dist[i] > fd) {
-              fd = dist[i];
-              far = i;
+            if (owner[i] !== T.FOG || dist[i] < 0) continue;
+            if (dist[i] < fgD) {
+              fgD = dist[i];
+              fogBest = i;
             }
           }
-          best = far;
+          if (fogBest >= 0) {
+            best = fogBest;
+          } else {
+            var far = -1;
+            var fd = -1;
+            for (i = 0; i < n; i++) {
+              if (owner[i] === pid || !isPassable(owner, i)) continue;
+              if (dist[i] > fd) {
+                fd = dist[i];
+                far = i;
+              }
+            }
+            best = far;
+          }
         }
       }
       S._focus = best;
@@ -768,8 +799,6 @@
           queue.push(j);
         }
       }
-      // 目标是空地时将军攒 2 兵就够出门探路；目标是硬方块才需要攒厚再打
-      var goalHard = owner[goal] >= 0;
       var cand = [];
       for (var i = 0; i < n; i++) {
         if (owner[i] !== pid || used.has(i) || armies[i] < 2 || dist[i] <= 0) continue;
@@ -777,10 +806,16 @@
           // 后期将军封存：地块产能已经超过将军，让它出门等于把不可再生的
           // 兵源挪到敌方视野边上。
           if (phase === 2) continue;
-          // 目标是空地：攒 2 个就出门铺地（这就是「将军向外推兵」）。
-          // 目标是硬方块：攒到 genSendMin 才动手，别拿将军去戳敌人的堆。
-          var genMin = goalHard ? genSendMin : 2;
-          if (armies[i] < genMin) continue;
+          /*
+           * 将军攒到 genSendMin 才出门，不管目标是空地还是硬方块。
+           *
+           * 原来「目标是空地就 2 兵出门」是个陷阱：每回合只抽走 1 个兵，主纵队
+           * 链条上每格永远卡着 1 兵——1 兵的格不能动，兵永远到不了前沿。迷雾局
+           * 里 focus 几乎总是空地，于是整局在「将军 → 中转格」这两三格之间来回
+           * 填兵，一步也没推出去（trace 里 125>105>104 反复 25 回合）。
+           * 攒到 6 再送，一次送 3 个，链才有厚度往前推。
+           */
+          if (armies[i] < genSendMin) continue;
           // 已经在敌方视野圈边上：确认朝目标方向还有一步是安全的，否则原地攒兵。
           if (!safeForGeneral(i)) {
             var canStep = false;

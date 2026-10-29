@@ -133,11 +133,19 @@ test('cities_diff 还原', () => {
 console.log('bot:');
 
 test('空地扩张（沿路径推进）', () => {
-  const S = makeState(3, 1, { 0: { owner: 0, army: 5 } }, { generals: [0] });
+  // 将军要攒到 GENERAL_SEND_MIN(6) 才出门，哪怕目标是空地：每回合抽 1 兵会让
+  // 主纵队的链条每格永远卡着 1 兵，兵到不了前沿。
+  const S = makeState(3, 1, { 0: { owner: 0, army: 6 } }, { generals: [0] });
   const moves = GB.bot.plan(S, { maxMoves: 6 });
   assert.ok(moves.length >= 1);
   assert.deepEqual(moves[0], [0, 1]);
   validate(S, moves);
+});
+
+test('将军没攒够就不出门', () => {
+  const S = makeState(3, 1, { 0: { owner: 0, army: 5 } }, { generals: [0] });
+  const moves = GB.bot.plan(S, { maxMoves: 6 });
+  assert.equal(moves.length, 0);
 });
 
 test('优先吃城市', () => {

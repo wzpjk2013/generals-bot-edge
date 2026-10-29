@@ -150,16 +150,18 @@ function applyMove(board, me, from, to, split) {
   return true;
 }
 
-function makeView(board, me) {
+function makeView(board, me, fog) {
   const generals = new Uint8Array(N);
-  generals[board.generals[0]] = 1;
-  generals[board.generals[1]] = 1;
-  let myGen = board.generals[me];
+  const enemyGen = board.generals[1 - me];
+  // 迷雾下：看不见的敌将位置就是 -1（服务器直接不发）
+  const myGen = board.generals[me];
+  if (myGen >= 0) generals[myGen] = 1;
+  if (!fog || fog.seen[enemyGen]) generals[enemyGen] = 1;
   return {
     w: W,
     h: H,
-    armies: board.armies,
-    owner: board.owner,
+    armies: fog ? fog.armies : board.armies,
+    owner: fog ? fog.owner : board.owner,
     cities: board.cities,
     mountains: board.mountains,
     generals,
@@ -171,6 +173,42 @@ function makeView(board, me) {
 function syncState(S, board, pid) {
   S.terrain.set(board.owner);
   S.armies.set(board.armies);
+}
+
+/*
+ * 迷雾。
+ *
+ * 官方服务器在 sendGameUpdate 里按视野过滤后才下发（this.map.serialized 里
+ * 不可见格写成 TILE_FOG / TILE_FOG_OBSTACLE、兵数抹成 0），所以客户端拿到的
+ * 是「最后已知状态」，不是全图。视野规则取自 Map.computeVisibility：
+ *   自己的每个格 + 它的四邻；城市则对所有玩家永久可见。
+ *
+ * 这里按同一套规则给每一方维护一份 lastSeen：可见就刷新，不可见就冻结在最后
+ * 一次看到的样子（官方客户端也是这么显示灰掉的格子的）。
+ */
+function makeFog() {
+  return {
+    owner: new Int16Array(N).fill(T.EMPTY),
+    armies: new Int32Array(N).fill(0),
+    seen: new Uint8Array(N)
+  };
+}
+
+function updateFog(fog, board, me) {
+  const vis = new Uint8Array(N);
+  for (let i = 0; i < N; i++) {
+    if (board.owner[i] !== me) continue;
+    vis[i] = 1;
+    for (const j of neighbors(i)) vis[j] = 1;
+  }
+  for (let i = 0; i < N; i++) {
+    if (board.cities[i]) vis[i] = 1; // 城市位置所有人可见
+    if (!vis[i]) continue;
+    fog.seen[i] = 1;
+    fog.owner[i] = board.owner[i];
+    fog.armies[i] = board.armies[i];
+  }
+  return vis;
 }
 
 function landCount(board, me) {
@@ -186,8 +224,9 @@ function armyCount(board, me) {
 }
 
 /* 一局。opponent 是参考 bot 名字，oursSide 0/1 决定谁先手，engineCfg 透传给 plan */
-function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineCfg) {
+function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineCfg, opts) {
   if (refBudget === undefined) refBudget = ourBudget;
+  const useFog = !!(opts && opts.fog);
   const rng = mulberry32(seed);
   const board = makeMap(rng);
   if (!board) return null;
@@ -212,6 +251,11 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
     S.turn = 0;
   }
   const states = [s0, s1];
+  const fogs = useFog ? [makeFog(), makeFog()] : null;
+  if (fogs) {
+    // 开局：将军和地图本身一开始就可见（官方 game_start 带 map 全量，之后才按视野过滤）
+    for (const p of [0, 1]) updateFog(fogs[p], board, p);
+  }
 
   const refRng = mulberry32(seed ^ 0x9e3779b9);
   const ref = makeRefAgent(opponent, refRng);
@@ -228,11 +272,25 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
       const me = p;
       if (board.owner[board.generals[me]] !== me) continue; // 已经死了
       const enemy = 1 - me;
-      const view = makeView(board, me);
+      // 迷雾下先按这一方当前的视野刷新 lastSeen，再让双方各自读自己的那份
+      if (fogs) updateFog(fogs[p], board, p);
+      const view = makeView(board, me, fogs ? fogs[p] : null);
 
       if (p === oursSide) {
         // 我们：引擎一次给出整回合的计划
-        syncState(states[p], board, p);
+        if (fogs) {
+          states[p].terrain.set(fogs[p].owner);
+          states[p].armies.set(fogs[p].armies);
+          // 服务器的 generals 数组里，看不见的对手将军就是 -1；看见过就永久记住
+          // （官方客户端也是这么处理的，灰掉的将军位置会一直留着）。
+          states[p].generals = [0, 1].map((q) => {
+            const g = board.generals[q];
+            if (q === p) return g;
+            return fogs[p].seen[g] ? g : -1;
+          });
+        } else {
+          syncState(states[p], board, p);
+        }
         // 引擎里的 S.turn 是服务器 tick（半个显示回合一个 tick），这里对齐成
         // tick 单位，否则按阶段划分的阈值会被慢放一倍。
         states[p].turn = turn * 2;
@@ -297,7 +355,7 @@ function wald(wins, games, success, total) {
   return games ? (wins + 0.5 * (games - wins - total)) / games : 0;
 }
 
-function runCell(opponent, ourBudget, refBudget, seeds, engineCfg) {
+function runCell(opponent, ourBudget, refBudget, seeds, engineCfg, opts) {
   const acc = {
     games: 0,
     wins: 0,
@@ -313,7 +371,7 @@ function runCell(opponent, ourBudget, refBudget, seeds, engineCfg) {
   for (let s = 0; s < seeds; s++) {
     const seed = 1000 + s * 7919;
     for (const oursSide of [0, 1]) {
-      const r = playGame(seed, opponent, ourBudget, refBudget, oursSide, false, engineCfg);
+      const r = playGame(seed, opponent, ourBudget, refBudget, oursSide, false, engineCfg, opts);
       if (!r) {
         acc.skipped++;
         continue;
@@ -394,6 +452,9 @@ if (require.main === module) {
     if (a.startsWith('--cfg=')) engineCfg = JSON.parse(a.slice(6));
   }
   if (process.env.GB_CFG) engineCfg = JSON.parse(process.env.GB_CFG);
+  // GB_FOG=1 开真实迷雾（服务器按视野过滤后才下发）。默认全视野是作弊版，
+  // 只用来和历史数据对比。
+  const opts = { fog: process.env.GB_FOG === '1' };
   const OPPONENTS = ['random', 'expander', 'hunter', 'harvester'];
   // 服务器每个半回合只从队列里消费一条攻击，所以每方每回合 1 条是唯一的真实赛制。
   // 多预算对照留给 scripts/bench-budget.js，那里明确标注了是反事实实验。
@@ -414,13 +475,20 @@ if (require.main === module) {
     '规则：1v1 全视野，格 +1/回合，城市隔回合 +1，一格一回合一动，将军死即败，' + MAX_TURNS + ' 回合未分胜负算和\n'
   );
   if (engineCfg) console.log('引擎参数覆盖：' + JSON.stringify(engineCfg) + '\n');
+  console.log(
+    '视野：' +
+      (opts.fog
+        ? '真实迷雾（每方只能看自己的领土 + 四邻；城市全局可见；看不见的格子冻结在最后已知状态）'
+        : '全视野（作弊版，官方服务器实际会按视野过滤）') +
+      '\n'
+  );
 
   const summary = [];
   for (const mode of MODES) {
     console.log('== ' + mode.label + ' ==');
     header();
     for (const opp of OPPONENTS) {
-      const acc = runCell(opp, mode.our, mode.ref, seeds, engineCfg);
+      const acc = runCell(opp, mode.our, mode.ref, seeds, engineCfg, opts);
       show(opp, acc);
       summary.push({ mode: mode.label, opp, acc });
     }
