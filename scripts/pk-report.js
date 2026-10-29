@@ -33,7 +33,9 @@ const OPPONENTS = [
   ['expander', 'strakam/generals-bots — 边境能吃的就吃'],
   ['hunter', 'strakam/generals-bots — 守将 + 单纵队 + 斩首'],
   ['harvester', 'strakam/generals-bots — hunter + 顺路吃城'],
-  ['ladder', 'harrischristiansen/generals-bot — 距离折扣 + 守备需求']
+  ['ladder', 'harrischristiansen/generals-bot — 距离折扣 + 守备需求'],
+  ['gc', 'SZXC-WG/LocalGen-new — GcBot，路线估价 + 目标黏性 + 25% 分位探索'],
+  ['szly', 'SZXC-WG/LocalGen-new — SzlyBot，块价值 + 收兵概率']
 ];
 // 单独一行、不进合计：同一份代码打自己，用来检查阵营 / 先后手有没有系统性偏差
 const MIRROR = ['engine', '本引擎镜像（同代码同参数，已分胜负里应为 50%）'];

@@ -511,7 +511,7 @@ if (require.main === module) {
   const opts = { fog: process.env.GB_FOG !== '0' };
   // ladder = harrischristiansen/generals-bot 的移植，比 strakam 的三个基线强一个档；
   // 它没有迷雾处理，所以迷雾下比全视野下弱得多（见 PK.md）。
-  const OPPONENTS = ['random', 'expander', 'hunter', 'harvester', 'ladder'];
+  const OPPONENTS = ['random', 'expander', 'hunter', 'harvester', 'ladder', 'gc', 'szly'];
   // 服务器每个半回合只从队列里消费一条攻击，所以每方每回合 1 条是唯一的真实赛制。
   // 多预算对照留给 scripts/bench-budget.js，那里明确标注了是反事实实验。
   const MODES = [{ our: 1, ref: 1, label: '真实赛制：每方每回合 1 步' }];

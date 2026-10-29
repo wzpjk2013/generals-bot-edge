@@ -489,6 +489,594 @@ function allPassable(view) {
   return p;
 }
 
+/* ---------------- gc：移植 LocalGen-new 的 GcBot ---------------- */
+
+/*
+ * https://github.com/SZXC-WG/LocalGen-new/blob/master/src/bots/gcBot.cpp
+ *（GoodCoder666，GPL-3.0）
+ *
+ * 这是目前能找到的开源启发式里最强的一个，也是结构最不一样的一个：它不选「目标格」
+ * 然后朝那儿推，而是给每格算一个**路线估价**，再在整张图上找价值最高的块。
+ *
+ *   evaluateRouteCosts(st)：从 st 出发 BFS，沿路累加 gv()
+ *     gv = 沼泽 -2 / 未知障碍 0 / 没见过的格子 +2 / 自己的格 army-1
+ *          城 -army/2 + (出发格兵/12) / 敌格 -army
+ *     同一距离下有两条路时取 eval 更高的那条 → 相当于「走富矿那条路」
+ *
+ *   目标分块价值
+ *     tileValue = tileTypeValue[type] + eval/5 - (dist + army/2) - √(40·曼哈顿距将军)
+ *     tileTypeValue 随兵力变形（armyStrength = log(min(3000, 总兵)+1)）：
+ *       平原 55-5s、沼泽 -500+50s、城 s²、未知障碍 35+4s
+ *
+ *   迷雾探索
+ *     needExploration = 没见过の平原，或者邻接「没见过的障碍」（可能是城）
+ *     取这些格子里距离的第 25 百分位（不是最近的那个，避免所有兵挤同一个角），
+ *     再和常规目标按 max(4·√总兵 - dist·3, …) 比一比
+ *
+ *   出兵
+ *     从 lastPos 出发沿 par 链走一步；有 7% 概率改成「重新选一个更靠近目标的出发格」
+ *     （A/B 里这一步是它拉开差距的地方：它会把后排积压的兵调上来）
+ *
+ *   将军
+ *     maxArmyPos 里将军的兵打 3/4 折、城打 5/6 折：将军要比最强地块厚 4/3 才会被
+ *     当成推土机；`distPenalty[d] = √(40d)` 把兵拴在将军周围
+ *
+ * 目标粘性：新目标的分数要超过旧目标 max(100, 0.03·army^0.86) 才换。
+ *
+ * 和原版的取舍：原版能一次下发多条（moveQueue），这里按擂台赛制每回合只回一条；
+ * rank 表拿不到，总兵力/地盘从自己的视野里算。
+ */
+var GC_INF = 1e15;
+
+function tileTypeOf(view, i) {
+  var o = view.owner[i];
+  if (o === -3) return 'plain'; // TILE_FOG：没见过的普通格
+  if (o === -4) return 'obstacle'; // TILE_FOG_OBSTACLE：山或城，看不见就分不出
+  if (o === -2) return 'mountain';
+  if (view.cities[i]) return 'city';
+  if (view.generals[i]) return 'general';
+  return 'plain';
+}
+
+function GcBotAgent() {
+  this.inited = false;
+  this.turn = 0;
+  this.tiles = null;
+  this.seenGeneral = null;
+  this.prevTarget = -1;
+  this.lastPos = -1;
+  this.distPenalty = null;
+  this.tv = { plain: 0, swamp: 0, city: 0, obstacle: 0, general: 0, mountain: 0 };
+}
+
+GcBotAgent.prototype.init = function (n, w, h) {
+  this.w = w;
+  this.h = h;
+  this.n = n;
+  this.tiles = new Array(n);
+  for (var i = 0; i < n; i++) {
+    this.tiles[i] = { army: -1, par: -1, eval: 0, dist: 0, occupier: -1, type: 'plain', known: false };
+  }
+  this.seenGeneral = [-1, -1];
+  this.distPenalty = new Int32Array(w + h);
+  for (var d = 0; d < w + h; d++) this.distPenalty[d] = Math.floor(Math.sqrt(d * 40));
+  this.inited = true;
+};
+
+GcBotAgent.prototype.accessible = function (i) {
+  if (i < 0 || i >= this.n) return false;
+  var t = this.tiles[i].type;
+  return t !== 'mountain' && t !== 'obstacle';
+};
+
+/* updateMemory：看见就记，看不见就保留记忆（GcBot 的 known 是粘性的） */
+GcBotAgent.prototype.updateMemory = function (view, me) {
+  for (var i = 0; i < this.n; i++) {
+    var tile = this.tiles[i];
+    var type = tileTypeOf(view, i);
+    var visible = view.owner[i] !== -3 && view.owner[i] !== -4;
+    if (visible) {
+      tile.known = true;
+      tile.type = type;
+      tile.occupier = view.owner[i];
+      if (type === 'general' && tile.occupier >= 0) this.seenGeneral[tile.occupier] = i;
+      var seen = view.armies[i];
+      tile.army =
+        tile.army < 0 || tile.occupier === me || tile.occupier === -1
+          ? seen
+          : ((seen + tile.army) / 2) | 0;
+    } else if (!tile.known) {
+      tile.type = type;
+    }
+  }
+};
+
+/* 从 st 出发的路线估价 BFS（GcBot::evaluateRouteCosts） */
+GcBotAgent.prototype.evaluateRouteCosts = function (st, view, me) {
+  var n = this.n;
+  var w = this.w;
+  var cityBonus = ((this.tiles[st].army / 12) | 0);
+  var self = this;
+  var gv = function (t) {
+    if (t.type === 'obstacle') return 0;
+    if (!t.known) return 2;
+    if (t.occupier === me) return t.army - 1;
+    if (t.type === 'city') return -((t.army / 2) | 0) + cityBonus;
+    return -t.army;
+  };
+  var i;
+  for (i = 0; i < n; i++) {
+    this.tiles[i].dist = 32767;
+    this.tiles[i].eval = -GC_INF;
+    this.tiles[i].par = -1;
+  }
+  var q = [st];
+  this.tiles[st].dist = 0;
+  this.tiles[st].eval = 0;
+  for (var h = 0; h < q.length; h++) {
+    var cur = q[h];
+    var tile = this.tiles[cur];
+    tile.eval += gv(tile);
+    var nb = neighborsOf(view, cur, false);
+    for (var k = 0; k < nb.length; k++) {
+      var nx = nb[k];
+      if (!self.accessible(nx)) continue;
+      var nTile = self.tiles[nx];
+      var nd = tile.dist + 1;
+      if (nd < nTile.dist) {
+        nTile.dist = nd;
+        nTile.eval = tile.eval;
+        nTile.par = cur;
+        q.push(nx);
+      } else if (nd === nTile.dist && tile.eval > nTile.eval) {
+        nTile.eval = tile.eval;
+        nTile.par = cur;
+      }
+    }
+  }
+};
+
+GcBotAgent.prototype.moveTowards = function (st, dest) {
+  var guard = 0;
+  while (this.tiles[dest].par !== st) {
+    var nx = this.tiles[dest].par;
+    if (nx < 0) return st;
+    dest = nx;
+    if (++guard > this.n) return st;
+  }
+  return dest;
+};
+
+GcBotAgent.prototype.maxArmyPos = function (me) {
+  var best = this.seenGeneral[me] >= 0 ? this.seenGeneral[me] : 0;
+  var maxArmy = 0;
+  for (var i = 0; i < this.n; i++) {
+    var t = this.tiles[i];
+    if (t.occupier !== me) continue;
+    var wa = t.army;
+    if (t.type === 'general') wa -= (wa / 4) | 0;
+    else if (t.type === 'city') wa -= (wa / 6) | 0;
+    if (wa > maxArmy) {
+      maxArmy = wa;
+      best = i;
+    }
+  }
+  return best;
+};
+
+GcBotAgent.prototype.plan = function (view) {
+  var n = view.w * view.h;
+  if (!this.inited) this.init(n, view.w, view.h);
+  this.turn++;
+  var me = view.me;
+  this.updateMemory(view, me);
+
+  var self = this;
+  var i;
+
+  var myArmy = 0;
+  var myLand = 0;
+  for (i = 0; i < n; i++) {
+    if (this.tiles[i].occupier === me) {
+      myArmy += Math.max(0, this.tiles[i].army);
+      myLand++;
+    }
+  }
+
+  // 开局：将军第一步踩最便宜的邻格
+  if (this.turn < 13 && myLand === 1) {
+    var gen = this.seenGeneral[me];
+    if (gen < 0) return null;
+    var minArmy = this.tiles[gen].army - 1;
+    var pick = gen;
+    var nb0 = neighborsOf(view, gen, false);
+    for (i = 0; i < nb0.length; i++) {
+      var j0 = nb0[i];
+      if (!this.accessible(j0)) continue;
+      var t0 = this.tiles[j0];
+      if (t0.type !== 'city' && !(t0.army < 0)) continue;
+      if (t0.army < minArmy) {
+        minArmy = t0.army;
+        pick = j0;
+      }
+    }
+    if (pick === gen) return null;
+    this.lastPos = pick;
+    return { from: gen, to: pick, split: false };
+  }
+
+  var s = Math.log(Math.min(3000, myArmy) + 1);
+  this.tv.plain = 55 - ((5 * s) | 0);
+  this.tv.swamp = -500 + ((50 * s) | 0);
+  this.tv.city = (s * s) | 0;
+  this.tv.obstacle = 35 + ((4 * s) | 0);
+
+  var coo = this.lastPos;
+  if (coo < 0 || !this.accessible(coo) || this.tiles[coo].occupier !== me || this.tiles[coo].army < 2) {
+    coo = this.maxArmyPos(me);
+    this.prevTarget = -1;
+  } else if (coo === this.prevTarget || (this.prevTarget >= 0 && this.tiles[this.prevTarget].occupier === me)) {
+    this.prevTarget = -1;
+  }
+
+  this.evaluateRouteCosts(coo, view, me);
+
+  var targetPos = -1;
+  // 见过敌将 → 直接奔那儿；1v1 只有一个对手
+  var opp = 1 - me;
+  if (this.seenGeneral[opp] >= 0 && this.tiles[this.seenGeneral[opp]].occupier === opp) {
+    targetPos = this.seenGeneral[opp];
+  } else if (
+    this.prevTarget < 0 ||
+    this.tiles[this.prevTarget].type !== 'plain' ||
+    this.tiles[this.prevTarget].known
+  ) {
+    var maxBlockValue = -GC_INF;
+
+    // 探索：没见过的平原，或邻接没见过的障碍
+    var unknown = [];
+    for (i = 0; i < n; i++) {
+      var t = this.tiles[i];
+      if (t.dist >= 500 || t.eval <= -100) continue;
+      if (t.type !== 'plain' && t.type !== 'swamp') continue;
+      var need = t.type === 'plain' && !t.known;
+      if (!need) {
+        var nb1 = neighborsOf(view, i, false);
+        for (var k1 = 0; k1 < nb1.length; k1++) {
+          var j1 = nb1[k1];
+          if (!self.accessible(j1)) continue;
+          if (self.tiles[j1].type === 'obstacle' && !self.tiles[j1].known) {
+            need = true;
+            break;
+          }
+        }
+      }
+      if (need) unknown.push([t.dist, i]);
+    }
+    if (unknown.length) {
+      unknown.sort(function (a, b) {
+        return a[0] - b[0];
+      });
+      var kk = (unknown.length / 4) | 0;
+      targetPos = unknown[kk][1];
+      maxBlockValue = Math.floor(4 * Math.sqrt(myArmy)) - this.tiles[targetPos].dist * 3;
+    }
+
+    var genMe = this.seenGeneral[me];
+    var computeTileValue = function (pos) {
+      var tt = self.tiles[pos];
+      var v = self.tv[tt.type] + tt.eval / 5 - (tt.dist + ((tt.army / 2) | 0));
+      if (genMe >= 0) {
+        var dx = Math.abs((pos % self.w) - (genMe % self.w));
+        var dy = Math.abs(((pos / self.w) | 0) - ((genMe / self.w) | 0));
+        v -= self.distPenalty[Math.min(self.w + self.h - 1, dx + dy)];
+      }
+      return v;
+    };
+
+    for (i = 0; i < n; i++) {
+      var ti = this.tiles[i];
+      if (ti.occupier === me || ti.dist >= 500) continue;
+      if (!this.accessible(i) || ti.type === 'general') continue;
+      var bv = computeTileValue(i);
+      if (bv > maxBlockValue) {
+        maxBlockValue = bv;
+        targetPos = i;
+      }
+    }
+
+    // 目标粘性
+    if (this.prevTarget >= 0) {
+      var pt = this.tiles[this.prevTarget];
+      if (pt.occupier !== me && this.accessible(this.prevTarget)) {
+        var prevValue = computeTileValue(this.prevTarget);
+        var margin = Math.max(100, 0.03 * Math.pow(myArmy, 0.86));
+        if (maxBlockValue - prevValue < margin) targetPos = this.prevTarget;
+      }
+    }
+  } else {
+    targetPos = this.prevTarget;
+  }
+
+  this.prevTarget = targetPos;
+  if (targetPos < 0) {
+    this.lastPos = -1;
+    return null;
+  }
+
+  // 95% 直接推一步；剩下 5% 左右重选一个更靠近目标的出发格（把后方积压的兵调上来）
+  if (
+    this.tiles[coo].type === 'swamp' ||
+    this.rngThreshold() > 0.07 ||
+    this.tiles[targetPos].eval > 150
+  ) {
+    var next = this.moveTowards(coo, targetPos);
+    if (next === coo) {
+      this.lastPos = -1;
+      return null;
+    }
+    this.lastPos = next;
+    return { from: coo, to: next, split: false };
+  }
+
+  this.evaluateRouteCosts(targetPos, view, me);
+  var maxWeight = -GC_INF;
+  var newFocus = -1;
+  for (i = 0; i < n; i++) {
+    var tf = this.tiles[i];
+    if (tf.occupier !== me || tf.army <= 1) continue;
+    var weight = tf.eval - 30 * tf.dist;
+    if (tf.type === 'general') weight -= (weight / 4) | 0;
+    if (weight > maxWeight) {
+      maxWeight = weight;
+      newFocus = i;
+    }
+  }
+  if (newFocus < 0) {
+    this.lastPos = -1;
+    return null;
+  }
+  this.evaluateRouteCosts(newFocus, view, me);
+  var np = this.moveTowards(newFocus, targetPos);
+  if (np === newFocus) {
+    this.lastPos = -1;
+    return null;
+  }
+  this.lastPos = np;
+  return { from: newFocus, to: np, split: false };
+};
+
+GcBotAgent.prototype.rngThreshold = function () {
+  return Math.random();
+};
+
+/* ---------------- szly：移植 LocalGen-new 的 SzlyBot ---------------- */
+
+/*
+ * https://github.com/SZXC-WG/LocalGen-new/blob/master/src/bots/szlyBot.cpp
+ *
+ * 比 GcBot 老一代，但结构清爽，是 LocalGen v5 的遗物。核心是「块价值」：
+ *
+ *   computeRoutes(st)：从出兵格 BFS，沿路累加 gv（自己的格 +army、看得见的敌格 -army、
+ *                     没见过按类型给分：空白 -5 / 城 -40 / 沼泽 -10 / 障碍 0）
+ *   blockValue = 类型权重 - 距离     空白 30 / 城 35 / 沼泽 -1000 / 障碍 25 / 将军 6
+ *   目标 = 全局 blockValue 最大的一格（见过敌将就直接奔敌将）
+ *
+ *   出兵之外还有一手「收兵」：看四位邻居，按 army - 250/(到将军距离+0.5) 打分，
+ *   沼泽 +1、将军 ×0.6、城 ×0.8；用 tanh(分数·0.015) 的概率把邻居并进来，
+ *   而不是自己往前走。这就是它把后排兵往前挪的方式。
+ *
+ * 迷雾：没见过的格子在 blockType 里记成「空白 / 障碍」，障碍按不可通行处理，
+ * 所以它不会往雾里的山/城上撞，但也从不主动去探。
+ */
+function SzlyBotAgent() {
+  this.inited = false;
+  this.lastPos = -1;
+  this.myGeneral = -1;
+  this.seenGeneral = [-1, -1];
+  this.blockType = null;
+  this.known = null;
+  this.blockValue = null;
+  this.evalArr = null;
+  this.parent = null;
+  this.dist = null;
+}
+
+var SZ_INF = 1e15;
+var SZ_BLOCK_WEIGHT = {
+  blank: 30,
+  swamp: -1000,
+  mountain: -SZ_INF,
+  general: 6,
+  city: 35,
+  obstacle: 25
+};
+var SZ_TYPE_VALUE = { blank: -5, mountain: -SZ_INF, city: -40, swamp: -10, general: -5, obstacle: 0 };
+
+SzlyBotAgent.prototype.init = function (n, w, h) {
+  this.n = n;
+  this.w = w;
+  this.h = h;
+  this.blockType = new Array(n).fill('blank');
+  this.known = new Uint8Array(n);
+  this.blockValue = new Float64Array(n);
+  this.evalArr = new Float64Array(n);
+  this.parent = new Int32Array(n).fill(-1);
+  this.dist = new Int32Array(n).fill(0x3f3f3f3f);
+  this.inited = true;
+};
+
+SzlyBotAgent.prototype.impassable = function (i) {
+  return this.blockType[i] === 'mountain' || this.blockType[i] === 'obstacle';
+};
+
+SzlyBotAgent.prototype.computeRoutes = function (st, view, me) {
+  var n = this.n;
+  var self = this;
+  for (var i = 0; i < n; i++) {
+    this.dist[i] = 0x3f3f3f3f;
+    this.evalArr[i] = -SZ_INF;
+    this.parent[i] = -1;
+  }
+  var gv = function (j) {
+    if (self.impassable(j)) return -SZ_INF;
+    var o = view.owner[j];
+    if (o === me) return view.armies[j];
+    if (o !== -3 && o !== -4) return -view.armies[j];
+    var v = SZ_TYPE_VALUE[self.blockType[j]];
+    return v === undefined ? 0 : v;
+  };
+  var q = [st];
+  this.dist[st] = 0;
+  this.evalArr[st] = 0;
+  for (var h = 0; h < q.length; h++) {
+    var cur = q[h];
+    var curDist = this.dist[cur];
+    var curEval = (this.evalArr[cur] += gv(cur));
+    var nb = neighborsOf(view, cur, false);
+    for (var k = 0; k < nb.length; k++) {
+      var nx = nb[k];
+      if (this.impassable(nx)) continue;
+      var nd = curDist + 1;
+      if (nd < this.dist[nx]) {
+        this.dist[nx] = nd;
+        this.evalArr[nx] = curEval;
+        this.parent[nx] = cur;
+        q.push(nx);
+      } else if (nd === this.dist[nx] && curEval > this.evalArr[nx]) {
+        this.evalArr[nx] = curEval;
+        this.parent[nx] = cur;
+      }
+    }
+  }
+  for (var i2 = 0; i2 < n; i2++) {
+    var w = SZ_BLOCK_WEIGHT[this.blockType[i2]];
+    if (w === undefined) w = 0;
+    this.blockValue[i2] = view.owner[i2] === me ? -SZ_INF : w - this.dist[i2];
+  }
+};
+
+SzlyBotAgent.prototype.moveTowards = function (st, dest) {
+  var guard = this.n;
+  while (this.parent[dest] !== st) {
+    var nx = this.parent[dest];
+    if (nx < 0 || --guard <= 0) return st;
+    dest = nx;
+  }
+  return dest;
+};
+
+SzlyBotAgent.prototype.plan = function (view) {
+  var n = view.w * view.h;
+  if (!this.inited) this.init(n, view.w, view.h);
+  var me = view.me;
+  var i;
+
+  for (i = 0; i < n; i++) {
+    var o = view.owner[i];
+    var visible = o !== -3 && o !== -4;
+    if (visible) {
+      this.known[i] = 1;
+      if (view.generals[i] && o >= 0) {
+        if (o === me) this.myGeneral = i;
+        else if (o < this.seenGeneral.length) this.seenGeneral[o] = i;
+      }
+      this.blockType[i] = view.cities[i] ? 'city' : view.generals[i] && o >= 0 ? 'general' : o === -2 ? 'mountain' : 'blank';
+    } else if (!this.known[i]) {
+      this.blockType[i] = o === -4 ? 'obstacle' : 'blank';
+    }
+  }
+
+  var coo = -1;
+  if (this.lastPos >= 0 && view.owner[this.lastPos] === me && view.armies[this.lastPos] > 1) {
+    coo = this.lastPos;
+  }
+  if (coo < 0) {
+    var maxArmy = 0;
+    coo = this.myGeneral >= 0 ? this.myGeneral : -1;
+    for (i = 0; i < n; i++) {
+      if (view.owner[i] !== me || view.armies[i] <= 0) continue;
+      var wa = view.armies[i];
+      if (this.blockType[i] === 'general') wa -= (wa / 4) | 0;
+      else if (this.blockType[i] === 'city') wa -= (wa / 6) | 0;
+      if (wa > maxArmy) {
+        maxArmy = wa;
+        coo = i;
+      }
+    }
+  }
+  if (coo < 0 || view.armies[coo] <= 1) return null;
+
+  var modeAttack = false;
+  var opp = 1 - me;
+  if (this.seenGeneral[opp] >= 0 && view.owner[this.seenGeneral[opp]] === opp) modeAttack = true;
+  else if (this.seenGeneral[opp] >= 0) modeAttack = true; // 记忆里的位置也照打
+
+  this.computeRoutes(coo, view, me);
+
+  var target = coo;
+  var pMul = 1.0;
+  if (modeAttack && this.seenGeneral[opp] >= 0) {
+    target = this.seenGeneral[opp];
+  } else {
+    var best = -SZ_INF;
+    for (i = 0; i < n; i++) {
+      if (this.blockValue[i] > best) {
+        best = this.blockValue[i];
+        target = i;
+      }
+    }
+    pMul *= 0.85;
+  }
+  if (this.parent[target] < 0) {
+    var minD = 0x3f3f3f3f;
+    for (i = 0; i < n; i++) {
+      if (this.parent[i] >= 0 && this.dist[i] < minD) {
+        minD = this.dist[i];
+        target = i;
+      }
+    }
+  }
+
+  var fastest = this.moveTowards(coo, target);
+  if (fastest === coo) return null;
+
+  if (this.blockType[coo] === 'swamp') {
+    this.lastPos = fastest;
+    return { from: coo, to: fastest, split: false };
+  }
+
+  var gather = -1;
+  var maxWeight = -1e18;
+  var nb = neighborsOf(view, coo, false);
+  for (var k = 0; k < nb.length; k++) {
+    var nc = nb[k];
+    if (nc === fastest) continue;
+    if (view.owner[nc] !== me || view.armies[nc] <= 2) continue;
+    var weight = view.armies[nc];
+    if (this.myGeneral >= 0) {
+      var dx = Math.abs((nc % this.w) - (this.myGeneral % this.w));
+      var dy = Math.abs(((nc / this.w) | 0) - ((this.myGeneral / this.w) | 0));
+      weight -= 250.0 / (dx + dy + 0.5);
+    } else {
+      weight -= 3;
+    }
+    if (this.blockType[nc] === 'swamp') weight += 1;
+    else if (this.blockType[nc] === 'general') weight *= 0.6;
+    else if (this.blockType[nc] === 'city') weight *= 0.8;
+    if (weight > maxWeight) {
+      maxWeight = weight;
+      gather = nc;
+    }
+  }
+  if (gather < 0 || Math.random() * 2 - 1 > pMul * Math.tanh(maxWeight * 0.015)) {
+    this.lastPos = fastest;
+    return { from: coo, to: fastest, split: false };
+  }
+  this.lastPos = coo;
+  return { from: gather, to: coo, split: false };
+};
+
 /* ---------------- 出厂 ---------------- */
 
 function makeRefAgent(name, rng) {
@@ -497,6 +1085,8 @@ function makeRefAgent(name, rng) {
   if (name === 'hunter') return new HunterAgent(rng);
   if (name === 'harvester') return new HarvesterAgent(rng);
   if (name === 'ladder') return new LadderAgent(rng);
+  if (name === 'gc') return new GcBotAgent(rng);
+  if (name === 'szly') return new SzlyBotAgent(rng);
   throw new Error('未知 agent: ' + name);
 }
 
