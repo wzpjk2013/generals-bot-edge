@@ -109,7 +109,13 @@
     }
 
     stats.moves += 1;
-    stats.last = mv[0] + '>' + mv[1];
+    // 面板上写成坐标比裸下标好读：(3,4) → (4,4)
+    var wcol = S.w || 0;
+    var coord = function (i) {
+      if (!wcol) return String(i);
+      return '(' + (i % wcol) + ',' + Math.floor(i / wcol) + ')';
+    };
+    stats.last = coord(mv[0]) + ' → ' + coord(mv[1]);
   }
 
   // 事件处理集中在这里：socket 订阅和 GB.feed（调试/自动化注入）走同一份
