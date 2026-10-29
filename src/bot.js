@@ -515,7 +515,10 @@
         cand.push(i);
       }
       cand.sort(function (a, b) {
-        return armies[b] - armies[a];
+        // 将军的兵要打点折扣：它是唯一兵源，抽空了后面就补不上。
+        var sa = a === myGeneral ? armies[a] * 0.6 : armies[a];
+        var sb = b === myGeneral ? armies[b] * 0.6 : armies[b];
+        return sb - sa;
       });
       for (var o = 0; o < cand.length; o++) {
         var from = cand[o];
@@ -547,13 +550,20 @@
       var i;
       dist[myGeneral] = 0;
       var threatArmy = -1;
-      var farThreat = 0;
+      var bestDelta = -Infinity;
       for (var h = 0; h < queue.length; h++) {
         var cur = queue[h];
         if (dist[cur] >= 8) continue;
         if (cur !== myGeneral && owner[cur] >= 0 && owner[cur] !== pid) {
-          if (dist[cur] <= 4 && armies[cur] > threatArmy) threatArmy = armies[cur];
-          if (armies[cur] > farThreat) farThreat = armies[cur];
+          // 用「到达时还剩多少兵」判断威胁，而不是当前兵数：敌人走过来要 dist
+          // 回合，这期间将军也在涨 dist 兵。只有 armies - dist > ga + dist 才算
+          // 真威胁——否则每次把兵送出去、将军暂时变薄都会触发并兵，
+          // 兵就在将军和前线之间来回搬，两个回合白走一趟。
+          var delta = armies[cur] - 2 * dist[cur];
+          if (delta > bestDelta) {
+            bestDelta = delta;
+            threatArmy = armies[cur];
+          }
           continue;
         }
         var list = nbr[cur];
@@ -564,11 +574,7 @@
           queue.push(j);
         }
       }
-      var ga3 = armies[myGeneral];
-      var danger = 0;
-      if (threatArmy > ga3) danger = threatArmy;
-      else if (farThreat > ga3 * 2 + 6) danger = farThreat;
-      if (!danger) return false;
+      if (threatArmy < 0 || bestDelta <= armies[myGeneral]) return false;
 
       var limit = budget;
       while (moves.length < limit) {
