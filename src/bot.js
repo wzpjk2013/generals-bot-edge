@@ -1,20 +1,29 @@
 /*
- * 决策引擎（纯函数，不改全局状态）。
+ * 决策引擎。
  *
- * 每回合（turn）跑一次，产出若干 [from, to] 走子：
- *   1. 斩首：贴脸的敌方将军能吃就吃，直接结束对局。
- *   2. 守将：自家将军被贴脸且打不过时，先把最强邻居并进来。
- *   3. 主扫描：城市 > 空地/中立 > 弱敌，按「价值 - 投入」排序，逐条执行到预算上限。
- *   4. 兜底：一条能走的都没有时，把腹地兵力一格格推向前线。
+ * 参考实现（同一套 generals.io 状态机，不同宿主）：
+ *   strakam/generals-bots  agents/hunter_agent.py   守家 + 输兵 + 斩首
+ *   strakam/generals-bots  agents/expander_agent.py 边境吃掉一切能吃的
+ *   vzhou842/generals.io-Node.js-Bot-example        地图/增量协议
  *
- * 走子合法性以本地乐观状态为准（commit 后立刻改 owner/armies），
- * 避免同一回合内重复调用同一格兵力。
+ * 这里把它们缝成一个每回合多次出子的计划器：
+ *
+ *   A. 斩首     贴脸敌将且打得过 → 直接吃，结束对局
+ *   B. 守将     将军被贴脸且打不过 → 反打 / 邻居代打 / 并兵
+ *   C. 扩张     全图 Dijkstra：cost = 沿路累计（守军+1），按 价值/代价^0.85 选目标，
+ *               沿 prev 链一次推进最多 4 步，重复到预算用完
+ *   D. 输兵     一个目标都找不到时，朝目标（敌将 > 最近敌军 > 最远迷雾）推进最厚的堆
+ *
+ * 所有出子都在本地乐观状态上提交，保证一格一回合只动一次。
  */
 (function () {
   'use strict';
 
   var GB = window.__GB;
   var T = GB.TILE;
+
+  var CHAIN_MAX = 4; // 单回合沿一条路径最多推几步
+  var GARRISON = 4; // 将军保底兵力（低于此值优先不动将军）
 
   function isPassable(terrain, i) {
     var t = terrain[i];
@@ -42,11 +51,50 @@
     return S._nbr;
   }
 
-  function adjacentTo(nbr, a, b) {
-    var list = nbr[a];
-    for (var i = 0; i < list.length; i++) if (list[i] === b) return true;
-    return false;
+  /* 最小堆：Dijkstra 用，元素是 [cost, index] */
+  function MinHeap() {
+    this.a = [];
   }
+  MinHeap.prototype.push = function (cost, idx) {
+    var a = this.a;
+    a.push([cost, idx]);
+    var i = a.length - 1;
+    while (i > 0) {
+      var p = (i - 1) >> 1;
+      if (a[p][0] <= a[i][0]) break;
+      var tmp = a[p];
+      a[p] = a[i];
+      a[i] = tmp;
+      i = p;
+    }
+  };
+  MinHeap.prototype.pop = function () {
+    var a = this.a;
+    var top = a[0];
+    var last = a.pop();
+    if (a.length) {
+      a[0] = last;
+      var i = 0;
+      for (;;) {
+        var l = 2 * i + 1;
+        var r = l + 1;
+        var m = i;
+        if (l < a.length && a[l][0] < a[m][0]) m = l;
+        if (r < a.length && a[r][0] < a[m][0]) m = r;
+        if (m === i) break;
+        var tmp = a[m];
+        a[m] = a[i];
+        a[i] = tmp;
+        i = m;
+      }
+    }
+    return top;
+  };
+  Object.defineProperty(MinHeap.prototype, 'size', {
+    get: function () {
+      return this.a.length;
+    }
+  });
 
   function plan(S, cfg) {
     var out = [];
@@ -56,15 +104,14 @@
     var pid = S.playerIndex;
     var nbr = neighbors(S);
     var generals = S.generals;
-    var cities = S.cities;
 
-    // 本地可写副本：走一步就更新一次，后续判断基于最新局面
+    // 本地可写副本
     var owner = Int16Array.from(S.terrain);
     var armies = Int32Array.from(S.armies);
 
     var isCity = new Uint8Array(n);
-    for (var c = 0; c < cities.length; c++) {
-      var ci = cities[c];
+    for (var c = 0; c < S.cities.length; c++) {
+      var ci = S.cities[c];
       if (ci >= 0 && ci < n) isCity[ci] = 1;
     }
 
@@ -86,17 +133,17 @@
       if (owner[from] !== pid) return false;
       if (!isPassable(owner, to)) return false;
       var a = armies[from];
-      if (a - 1 <= armies[to]) return false; // 必须严格大于守军才能拿下
+      if (a - 1 <= armies[to]) return false; // 必须严格大于守军
       armies[to] = a - 1 - armies[to];
       armies[from] = 0;
       owner[to] = pid;
       used.add(from);
       moves.push([from, to]);
-      reasons.push(why + ':' + from + '>' + to);
+      if (why) reasons.push(why + ':' + from + '>' + to);
       return true;
     }
 
-    // 1. 斩首
+    // A. 斩首
     for (var q = 0; q < generals.length; q++) {
       if (q === pid) continue;
       var eg = generals[q];
@@ -113,8 +160,8 @@
       break;
     }
 
-    // 2. 守将
-    if (myGeneral >= 0) {
+    // B. 守将
+    if (myGeneral >= 0 && owner[myGeneral] === pid) {
       var threat = -1;
       var threatArmy = -1;
       var ga = nbr[myGeneral];
@@ -126,7 +173,6 @@
         }
       }
       if (threat >= 0 && armies[myGeneral] <= threatArmy) {
-        // 先反打，再让邻居代打，最后才是把兵并进将军硬扛
         if (!move(myGeneral, threat, 'defend')) {
           var killer = -1;
           var u;
@@ -139,97 +185,203 @@
           if (killer >= 0) {
             move(killer, threat, 'defend');
           } else {
-            var src = -1;
+            var res = -1;
             for (u = 0; u < ga.length; u++) {
               var s3 = ga[u];
               if (owner[s3] !== pid || s3 === myGeneral || used.has(s3)) continue;
               if (armies[s3] - 1 <= armies[myGeneral]) continue;
-              if (src < 0 || armies[s3] > armies[src]) src = s3;
+              if (res < 0 || armies[s3] > armies[res]) res = s3;
             }
-            if (src >= 0) move(src, myGeneral, 'defend');
+            if (res >= 0) move(res, myGeneral, 'defend');
           }
         }
       }
     }
 
-    // 3. 主扫描
-    var cands = [];
-    for (var i = 0; i < n; i++) {
-      if (owner[i] !== pid || used.has(i)) continue;
-      var myArmy = armies[i];
-      if (myArmy < 2) continue;
-      var nb = nbr[i];
-      for (var d = 0; d < nb.length; d++) {
-        var tgt = nb[d];
-        if (owner[tgt] === pid || !isPassable(owner, tgt)) continue;
-        var surplus = myArmy - 1 - armies[tgt];
-        if (surplus <= 0) continue;
+    // C. 扩张：反复求最便宜的“值得吃”的目标，链式推进
+    while (moves.length < budget) {
+      var reach = computeReach(n, nbr, owner, armies, pid);
+      var target = pickTarget(n, nbr, owner, armies, reach, pid, myGeneral, isCity, generalPlayer);
+      if (!target) break;
+      if (!advance(target, reach)) break;
+    }
+
+    // D. 输兵：找不到任何可吃目标时，朝目标推最厚的堆
+    if (moves.length === 0) conveyor();
+
+    function computeReach(n, nbr, owner, armies, pid) {
+      var cost = new Float64Array(n);
+      var src = new Int32Array(n);
+      var prev = new Int32Array(n);
+      var heap = new MinHeap();
+      var i;
+      for (i = 0; i < n; i++) {
+        cost[i] = Infinity;
+        src[i] = -1;
+        prev[i] = -1;
+        if (owner[i] === pid) {
+          cost[i] = 0;
+          src[i] = i;
+          heap.push(0, i);
+        }
+      }
+      while (heap.size) {
+        var top = heap.pop();
+        var d = top[0];
+        var cur = top[1];
+        if (d > cost[cur]) continue;
+        var list = nbr[cur];
+        for (var k = 0; k < list.length; k++) {
+          var j = list[k];
+          if (!isPassable(owner, j)) continue;
+          var nd = owner[j] === pid ? d : d + armies[j] + 1;
+          // 代价相同就让兵最多的那格出兵，别让将军去跑腿
+          var betterSrc =
+            owner[j] !== pid && src[cur] >= 0 && (src[j] < 0 || armies[src[cur]] > armies[src[j]]);
+          if (nd < cost[j] || (nd === cost[j] && betterSrc)) {
+            cost[j] = nd;
+            src[j] = src[cur];
+            prev[j] = cur;
+            heap.push(nd, j);
+          }
+        }
+      }
+      return { cost: cost, src: src, prev: prev };
+    }
+
+    function pickTarget(n, nbr, owner, armies, reach, pid, myGeneral, isCity, generalPlayer) {
+      var best = -1;
+      var bestScore = 0;
+      for (var i = 0; i < n; i++) {
+        if (owner[i] === pid) continue;
+        var c = reach.cost[i];
+        if (!(c < Infinity)) continue;
+        var s = reach.src[i];
+        if (s < 0) continue;
+        if (armies[s] < c) continue; // 兵力不够，别白送
 
         var value;
-        if (isCity[tgt]) value = 9000;
-        else if (owner[tgt] >= 0) value = 500 + (armies[tgt] <= 3 ? 300 : 0);
-        else value = 150 - Math.min(120, armies[tgt] * 5);
+        if (isCity[i]) value = 6;
+        else if (owner[i] >= 0) value = 3;
+        else value = 1;
+        var ownerOf = generalPlayer.get(i);
+        if (ownerOf !== undefined && ownerOf !== pid) value = 60; // 敌将
 
-        var gpAt = generalPlayer.get(tgt);
-        if (gpAt !== undefined && gpAt !== pid) value += 12000; // 敌将
-        if (myGeneral >= 0 && adjacentTo(nbr, tgt, myGeneral)) value += 2500; // 贴脸威胁
-
-        cands.push({ f: i, t: tgt, s: value - surplus * 0.6 - armies[tgt] * 0.4 });
-      }
-    }
-    cands.sort(function (a, b) {
-      return b.s - a.s || a.f - b.f;
-    });
-    for (var m = 0; m < cands.length && moves.length < budget; m++) {
-      move(cands[m].f, cands[m].t, 'grow');
-    }
-
-    // 4. 兜底合兵
-    if (moves.length === 0) consolidate();
-
-    function consolidate() {
-      var frontier = new Uint8Array(n);
-      for (var i = 0; i < n; i++) {
-        if (owner[i] !== pid) continue;
+        var risk = 1;
+        var left = armies[s] - c; // 推到这里之后手里还剩多少
         var nb = nbr[i];
-        for (var j = 0; j < nb.length; j++) {
-          if (owner[nb[j]] !== pid && isPassable(owner, nb[j])) {
-            frontier[i] = 1;
+        for (var k = 0; k < nb.length; k++) {
+          var j = nb[k];
+          if (owner[j] >= 0 && owner[j] !== pid && armies[j] > left) {
+            risk = 0.55; // 落点旁边有比我们厚的敌人
             break;
           }
         }
+        if (s === myGeneral && armies[s] < GARRISON * 3) risk *= 0.5;
+
+        var score = (value / Math.pow(1 + c, 0.85)) * risk;
+        if (score > bestScore) {
+          bestScore = score;
+          best = i;
+        }
+      }
+      return best < 0 ? null : { to: best };
+    }
+
+    function advance(target, reach) {
+      var to = target.to;
+      var s = reach.src[to];
+      if (s < 0) return false;
+      var path = [];
+      var cur = to;
+      var guard = 0;
+      while (cur !== -1 && cur !== s && guard++ < 200) {
+        path.push(cur);
+        cur = reach.prev[cur];
+      }
+      if (!path.length) return false;
+      path.reverse();
+
+      var from = s;
+      var moved = false;
+      for (var k = 0; k < path.length && k < CHAIN_MAX && moves.length < budget; k++) {
+        if (!move(from, path[k], moved ? 'chain' : 'grow')) break;
+        from = path[k];
+        moved = true;
+      }
+      return moved;
+    }
+
+    // 目标：敌将 > 最近的敌方地块 > 最远的可探索格
+    function pickGoal() {
+      var gpIter = generalPlayer.entries();
+      for (var e = gpIter.next(); !e.done; e = gpIter.next()) {
+        if (e.value[1] !== pid && owner[e.value[0]] === e.value[1]) return e.value[0];
       }
       var dist = new Int32Array(n).fill(-1);
-      var parent = new Int32Array(n).fill(-1);
       var queue = [];
-      for (var a = 0; a < n; a++) {
-        if (frontier[a]) {
-          dist[a] = 0;
-          queue.push(a);
+      var i;
+      for (i = 0; i < n; i++) {
+        if (owner[i] === pid) {
+          dist[i] = 0;
+          queue.push(i);
         }
       }
+      var nearestEnemy = -1;
+      var far = -1;
       for (var h = 0; h < queue.length; h++) {
         var cur = queue[h];
-        if (dist[cur] >= 8) continue;
-        var cn = nbr[cur];
-        for (var x = 0; x < cn.length; x++) {
-          var nx = cn[x];
-          if (owner[nx] !== pid || dist[nx] !== -1) continue;
-          dist[nx] = dist[cur] + 1;
-          parent[nx] = cur;
-          queue.push(nx);
+        if (owner[cur] >= 0 && owner[cur] !== pid) {
+          nearestEnemy = cur;
+          break;
+        }
+        var list = nbr[cur];
+        for (var k = 0; k < list.length; k++) {
+          var j = list[k];
+          if (dist[j] !== -1 || !isPassable(owner, j)) continue;
+          dist[j] = dist[cur] + 1;
+          queue.push(j);
+          if (far < 0 || dist[j] > dist[far]) far = j;
         }
       }
-      var order = queue.slice().sort(function (b1, b2) {
-        return dist[b2] - dist[b1] || b1 - b2;
+      return nearestEnemy >= 0 ? nearestEnemy : far;
+    }
+
+    function conveyor() {
+      var goal = pickGoal();
+      if (goal < 0) return;
+      // 从目标反向 BFS 出步数场，朝 0 走
+      var dist = new Int32Array(n).fill(-1);
+      var queue = [goal];
+      dist[goal] = 0;
+      for (var h = 0; h < queue.length; h++) {
+        var cur = queue[h];
+        var list = nbr[cur];
+        for (var k = 0; k < list.length; k++) {
+          var j = list[k];
+          if (dist[j] !== -1 || !isPassable(owner, j)) continue;
+          dist[j] = dist[cur] + 1;
+          queue.push(j);
+        }
+      }
+      var order = [].concat(queue).sort(function (a, b) {
+        return armies[b] - armies[a];
       });
       for (var o = 0; o < order.length && moves.length < budget; o++) {
-        var cell = order[o];
-        if (dist[cell] <= 0) continue;
-        if (armies[cell] < 2 || used.has(cell)) continue;
-        var par = parent[cell];
-        if (par < 0) continue;
-        move(cell, par, 'merge');
+        var i = order[o];
+        if (owner[i] !== pid || used.has(i) || armies[i] < 2) continue;
+        if (dist[i] <= 0) continue;
+        var nb = nbr[i];
+        var best = -1;
+        for (var k = 0; k < nb.length; k++) {
+          var j2 = nb[k];
+          if (dist[j2] === dist[i] - 1 && isPassable(owner, j2)) {
+            best = j2;
+            break;
+          }
+        }
+        if (best < 0) continue;
+        move(i, best, 'push');
       }
     }
 

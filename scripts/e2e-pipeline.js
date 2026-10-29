@@ -92,11 +92,12 @@ const FFA_CASE = `
     first.emitted = attacks;
 
     const ffa = await evaluate(cdp, FFA_CASE);
-    await sleep(500);
+    await sleep(700);
+    ffa.emitted = await evaluate(cdp, 'window.__GB.__sent');
 
     console.log('--- 自建房间 ---');
     console.log(JSON.stringify({ inject: first, state: after }, null, 2));
-    console.log('--- 公开对局（默认拦截）---');
+    console.log('--- 公开对局 ffa ---');
     console.log(JSON.stringify(ffa, null, 2));
 
     if (!first.ready && !first.ok) failed = true;
@@ -110,8 +111,8 @@ const FFA_CASE = `
         failed = true;
       }
     }
-    if (ffa.emitted.some((a) => a[0] === 'attack')) {
-      console.log('FAIL: 公开对局没有被拦截');
+    if (!ffa.emitted.some((a) => a[0] === 'attack')) {
+      console.log('FAIL: 公开对局没有接管');
       failed = true;
     }
   } catch (e) {

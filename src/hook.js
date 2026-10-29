@@ -17,7 +17,6 @@
 
   var settings = {
     enabled: true,
-    allowPublic: false,
     maxMoves: 6
   };
   GB.settings = settings;
@@ -41,23 +40,13 @@
     }
   }
 
-  // 公开匹配（1v1 / ffa / 2v2 / bigteam）默认拦截，只放行自建房间
-  function blockedReason() {
-    if (!settings.enabled) return '已暂停';
-    if (state.gameType !== 'custom' && !settings.allowPublic) {
-      return '非自建房间已拦截：' + (state.gameType || '未知类型');
-    }
-    return '';
-  }
-
+  // 公开匹配和自建房间一视同仁：进对局就接管
   function drive() {
     var S = state;
     stats.blocked = '';
     if (!S.ready || S.playerIndex < 0 || S.ended) return;
-
-    var blocked = blockedReason();
-    if (blocked) {
-      stats.blocked = blocked;
+    if (!settings.enabled) {
+      stats.blocked = '已暂停';
       return;
     }
     if (S.turn === lastDrive.turn) return;
@@ -195,7 +184,6 @@
     '  <div class="hd"><span>Generals AutoPilot</span><span id="fold">−</span></div>',
     '  <div id="body">',
     '    <div class="row"><span class="k">启用</span><span class="sw" id="sw-enable"><i></i></span></div>',
-    '    <div class="row"><span class="k">公开对局</span><span class="sw" id="sw-public"><i></i></span></div>',
     '    <div class="row"><span class="k">每回合步数</span><input id="in-max" type="number" min="1" max="20" step="1"></div>',
     '    <div class="row"><span class="k">状态</span><span class="v" id="st">等待连接</span></div>',
     '    <div class="row"><span class="k">回合</span><span class="v" id="st2">-</span></div>',
@@ -226,7 +214,6 @@
     ui = {
       root: root,
       enabled: el(root, 'sw-enable'),
-      isPublic: el(root, 'sw-public'),
       max: el(root, 'in-max'),
       st: el(root, 'st'),
       st2: el(root, 'st2'),
@@ -239,11 +226,6 @@
 
     ui.enabled.addEventListener('click', function () {
       settings.enabled = !settings.enabled;
-      postSettings();
-      refresh();
-    });
-    ui.isPublic.addEventListener('click', function () {
-      settings.allowPublic = !settings.allowPublic;
       postSettings();
       refresh();
     });
@@ -267,7 +249,6 @@
   function refresh() {
     if (!ui) return;
     setSwitch(ui.enabled, settings.enabled);
-    setSwitch(ui.isPublic, settings.allowPublic);
     if (document.activeElement !== ui.max) ui.max.value = settings.maxMoves;
 
     var S = state;
@@ -309,7 +290,6 @@
     if (e.source !== window || !d || d.__gb !== 'settings') return;
     var s = d.settings || {};
     if (typeof s.enabled === 'boolean') settings.enabled = s.enabled;
-    if (typeof s.allowPublic === 'boolean') settings.allowPublic = s.allowPublic;
     if (Number.isInteger(s.maxMoves) && s.maxMoves >= 1 && s.maxMoves <= 20) {
       settings.maxMoves = s.maxMoves;
     }
