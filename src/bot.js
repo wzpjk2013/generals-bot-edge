@@ -27,7 +27,7 @@
   var POKE_MARGIN = 4; // 进攻敌方地块时，出兵堆要比「打穿代价」多出这么多才动手
   // 将军要攒到这个数才往硬目标送兵。真实产兵规则下将军每回合 +1，是唯一的稳定
   // 兵源；攒着不动才有一拳打出去的兵力，每回合挤一个兵出去只会让兵永远散在路上。
-  var GENERAL_SEND_MIN = 8;
+  var GENERAL_SEND_MIN = 6;
 
   function isPassable(terrain, i) {
     var t = terrain[i];
