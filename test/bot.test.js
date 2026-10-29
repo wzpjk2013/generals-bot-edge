@@ -182,14 +182,31 @@ test('将军被围时邻居代打', () => {
   assert.ok(moves.some((m) => m[1] === 0), '应吃掉贴脸的敌人: ' + JSON.stringify(moves));
 });
 
-test('无扩张空间时向前线输兵', () => {
+test('将军对面压着绝对优势兵力时不白送兵', () => {
+  // 7x1 直线走廊，尽头 100 兵。10 兵冲上去只是给对面喂兵，
+  // 有效动作只能是我方内部并兵，不能有任何一个格子朝敌方 6 号格走。
   const tiles = {};
   for (let i = 0; i < 6; i++) tiles[i] = { owner: 0, army: i === 0 ? 10 : 1 };
   tiles[6] = { owner: 1, army: 100 };
   const S = makeState(7, 1, tiles, { generals: [0] });
-  const moves = GB.bot.plan(S, { maxMoves: 6 });
-  assert.ok(moves.some((m) => m[0] === 0), '应推动 0 号格兵力: ' + JSON.stringify(moves));
+  const moves = GB.bot.plan(S, { maxMoves: 1 });
   validate(S, moves);
+  assert.ok(!moves.some((m) => m[1] === 6), '不该白送: ' + JSON.stringify(moves));
+});
+
+test('打不动城市时把兵朝城市汇集', () => {
+  // 7x7：第一行是我方走廊，9 号是 40 兵的城市。打不动，但兵要朝那个方向流。
+  const tiles = {};
+  for (let i = 0; i < 7; i++) tiles[i] = { owner: 0, army: i === 0 ? 6 : 1 };
+  tiles[9] = { city: true, army: 40 };
+  const S = makeState(7, 7, tiles, { generals: [0] });
+  const moves = GB.bot.plan(S, { maxMoves: 1 });
+  validate(S, moves);
+  assert.ok(moves.length > 0, '应该把兵往城市方向推: ' + JSON.stringify(moves));
+  assert.ok(
+    moves.some((m) => m[0] === 0),
+    '该由最肥的 0 号格出兵: ' + JSON.stringify(moves)
+  );
 });
 
 test('绕山走：直线被山挡时从另一侧包过去', () => {

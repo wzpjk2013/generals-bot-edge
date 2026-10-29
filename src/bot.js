@@ -25,6 +25,9 @@
   var CHAIN_MAX = 4; // 单回合沿一条路径最多推几步
   var GARRISON = 4; // 将军保底兵力（低于此值优先不动将军）
   var POKE_MARGIN = 4; // 进攻敌方地块时，出兵堆要比「打穿代价」多出这么多才动手
+  // 将军要攒到这个数才往硬目标送兵。真实产兵规则下将军每回合 +1，是唯一的稳定
+  // 兵源；攒着不动才有一拳打出去的兵力，每回合挤一个兵出去只会让兵永远散在路上。
+  var GENERAL_SEND_MIN = 8;
 
   function isPassable(terrain, i) {
     var t = terrain[i];
@@ -136,11 +139,24 @@
       var a = armies[from];
       if (a < 2) return false;
       var own = owner[to] === pid;
-      // 往自己的格子并兵永远合法（只损耗 1），往敌人格必须打得过
-      if (!own && a - 1 <= armies[to]) return false;
+      var genOut = from === myGeneral && to !== myGeneral;
+      // 将军隔壁已经有敌人时，只允许直接打它。把将军的兵送去别的方向等于自杀：
+      // 将军被吃得手整局就结束，前面攒多少都没用。
+      if (genOut && !(owner[to] >= 0 && owner[to] !== pid)) {
+        var gadj = nbr[myGeneral];
+        for (var gi = 0; gi < gadj.length; gi++) {
+          var gj = gadj[gi];
+          if (owner[gj] >= 0 && owner[gj] !== pid) return false;
+        }
+      }
+      // 将军出兵要留底：一次送光，下一回合被贴脸就没得守了。
       var sent = a - 1;
+      if (genOut) sent = a - Math.min(GARRISON, a >> 1);
+      if (sent < 1) return false;
+      // 往自己的格子并兵永远合法（只损耗 1），往敌人格必须打得过
+      if (!own && sent <= armies[to]) return false;
       armies[to] = own ? sent + armies[to] : sent - armies[to];
-      armies[from] = 0;
+      armies[from] = a - sent;
       owner[to] = pid;
       used.add(from);
       moves.push([from, to]);
@@ -206,18 +222,28 @@
     // B2. 预警：视野内最厚的敌军在 8 步内且比将军厚，先把附近的兵并进将军
     var alarmed = defendWarn();
 
-    // C. 扩张：反复求最便宜的“值得吃”的目标，链式推进
-    while (!alarmed && moves.length < budget) {
-      var reach = computeReach(n, nbr, owner, armies, pid);
-      var target = pickTarget(n, nbr, owner, armies, reach, pid, myGeneral, isCity, generalPlayer);
-      if (!target) break;
-      if (!advance(target, reach)) break;
+    // C. 单栈推进（照 hunter 的打法）：只养一个 focus，每回合把「最重的那一堆」
+    //    朝它推一格。1 步/回合下的吞吐就是被搬那一格的兵减一，所以搬最重的才有效；
+    //    同时最多维持两条战线，为地盘四处开花等于把兵摊成每格 1 的薄片。
+    var focus = -1;
+    if (!alarmed) {
+      focus = pickFocus();
+      if (focus >= 0) {
+        if (!supply(focus)) {
+          S._focusStuck = (S._focusStuck | 0) + 1;
+          // 卡十几回合说明正面啃不动，换目标，别死磕一个啃不动的格
+          if (S._focusStuck > 12) {
+            S._focus = -1;
+            S._focusStuck = 0;
+          }
+        } else {
+          S._focusStuck = 0;
+        }
+      }
     }
 
-    // D. 输兵：C 吃不动之后，用分层最大流把后排兵力往各个缺口送（flow.js）
-    if (moves.length < budget) transport();
-    // 连缺口都没有（前线被山挡死之类）时退回单目标推土机
-    if (moves.length === 0) conveyor();
+    // D. 兜底：完全推不动时朝最近的敌人/最远处挪一步，别整回合空转
+    if (moves.length === 0 && !alarmed) conveyor();
 
     function computeReach(n, nbr, owner, armies, pid) {
       var cost = new Float64Array(n);
@@ -325,9 +351,139 @@
     }
 
     /*
+     * 单栈 focus：跨回合保持同一个目标，只有拿下 / 卡死才换。
+     * 优先级照 hunter：敌方将军 > 最近的敌方地块 > 最近的未占城市 > 最远的可探索格。
+     * 目标粘性是关键——每回合换目标等于每回合重新铺一条路，兵永远在路上。
+     */
+    function pickFocus() {
+      var prev = S._focus;
+      if (prev >= 0 && prev < n && owner[prev] !== pid) return prev;
+
+      var it = generalPlayer.entries();
+      for (var e = it.next(); !e.done; e = it.next()) {
+        var gp2 = e.value[0];
+        if (e.value[1] !== pid && owner[gp2] === e.value[1]) {
+          S._focus = gp2;
+          S._focusStuck = 0;
+          return gp2;
+        }
+      }
+
+      var dist = new Int32Array(n).fill(-1);
+      var queue = [];
+      var i;
+      for (i = 0; i < n; i++) {
+        if (owner[i] === pid) {
+          dist[i] = 0;
+          queue.push(i);
+        }
+      }
+      for (var h = 0; h < queue.length; h++) {
+        var cur = queue[h];
+        var list = nbr[cur];
+        for (var k = 0; k < list.length; k++) {
+          var j = list[k];
+          if (dist[j] !== -1 || !isPassable(owner, j)) continue;
+          dist[j] = dist[cur] + 1;
+          queue.push(j);
+        }
+      }
+
+      // 最近的敌方地块
+      var best = -1;
+      var bestD = Infinity;
+      for (i = 0; i < n; i++) {
+        if (owner[i] < 0 || owner[i] === pid || dist[i] < 0) continue;
+        if (dist[i] < bestD) {
+          bestD = dist[i];
+          best = i;
+        }
+      }
+      if (best < 0) {
+        // 没有敌人：先去拿城市（唯一的地盘类兵源），没有城市再往最远处探路
+        var cityBest = -1;
+        var cd = Infinity;
+        for (i = 0; i < n; i++) {
+          if (!isCity[i] || owner[i] === pid || dist[i] < 0) continue;
+          if (dist[i] < cd) {
+            cd = dist[i];
+            cityBest = i;
+          }
+        }
+        if (cityBest >= 0) {
+          best = cityBest;
+        } else {
+          var far = -1;
+          var fd = -1;
+          for (i = 0; i < n; i++) {
+            if (owner[i] === pid || !isPassable(owner, i)) continue;
+            if (dist[i] > fd) {
+              fd = dist[i];
+              far = i;
+            }
+          }
+          best = far;
+        }
+      }
+      S._focus = best;
+      S._focusStuck = 0;
+      return best;
+    }
+
+    /*
+     * 朝目标推一格：反向 BFS 出步数场，然后按「兵最多」挑一个能往目标方向动
+     * 的己方格子。这就是主纵队的形成方式——最重的那堆先走，后排把兵补上去，
+     * 每回合只花一条命令，但整条链一直在往一个方向流。
+     * 按距离挑是错的：那会让每格轮流送 1 个兵，兵永远散在通往目标的路上。
+     */
+    function supply(goal) {
+      if (!(goal >= 0 && goal < n)) return false;
+      var dist = new Int32Array(n).fill(-1);
+      var queue = [goal];
+      dist[goal] = 0;
+      for (var h = 0; h < queue.length; h++) {
+        var cur = queue[h];
+        var list = nbr[cur];
+        for (var k = 0; k < list.length; k++) {
+          var j = list[k];
+          if (dist[j] !== -1 || !isPassable(owner, j)) continue;
+          dist[j] = dist[cur] + 1;
+          queue.push(j);
+        }
+      }
+      // 目标是空地时将军 2 兵就够出门探路；目标是硬方块才需要攒厚再打
+      var genMin = owner[goal] < 0 ? 2 : GENERAL_SEND_MIN;
+      var cand = [];
+      for (var i = 0; i < n; i++) {
+        if (owner[i] !== pid || used.has(i) || armies[i] < 2 || dist[i] <= 0) continue;
+        if (i === myGeneral && armies[i] < genMin) continue;
+        cand.push(i);
+      }
+      cand.sort(function (a, b) {
+        return armies[b] - armies[a];
+      });
+      for (var o = 0; o < cand.length; o++) {
+        var from = cand[o];
+        var step = -1;
+        var nb = nbr[from];
+        for (var k2 = 0; k2 < nb.length; k2++) {
+          var j2 = nb[k2];
+          if (dist[j2] === dist[from] - 1 && isPassable(owner, j2)) {
+            step = j2;
+            break;
+          }
+        }
+        if (step < 0) continue;
+        if (move(from, step, 'push')) return true;
+      }
+      return false;
+    }
+
+    /*
      * 预警守将：从将军往外 BFS 最多 8 步，找视野内最厚的敌军。
-     * 比将军厚就把将军 3 步内最厚的几堆兵往回并；并完还挡不住就返回 true，
-     * 这一回合不再往外撒兵（PK 里被 hunter 的蛇打穿就是这么丢的将军）。
+     * 贴着将军的按原值算，远处的要厚一倍才算威胁——真实产兵规则下将军每回合
+     * 才 +1，要是「任何比我厚的兵都算威胁」，引擎整局都在回头并兵，一步也推不出去。
+     * 并完就继续推进：每回合只有一条命令，站着等死比冲出去更亏。
      */
     function defendWarn() {
       if (myGeneral < 0 || owner[myGeneral] !== pid) return false;
@@ -336,11 +492,13 @@
       var i;
       dist[myGeneral] = 0;
       var threatArmy = -1;
+      var farThreat = 0;
       for (var h = 0; h < queue.length; h++) {
         var cur = queue[h];
-        if (dist[cur] >= 12) continue;
+        if (dist[cur] >= 8) continue;
         if (cur !== myGeneral && owner[cur] >= 0 && owner[cur] !== pid) {
-          if (armies[cur] > threatArmy) threatArmy = armies[cur];
+          if (dist[cur] <= 4 && armies[cur] > threatArmy) threatArmy = armies[cur];
+          if (armies[cur] > farThreat) farThreat = armies[cur];
           continue;
         }
         var list = nbr[cur];
@@ -351,7 +509,11 @@
           queue.push(j);
         }
       }
-      if (threatArmy <= armies[myGeneral]) return false;
+      var ga3 = armies[myGeneral];
+      var danger = 0;
+      if (threatArmy > ga3) danger = threatArmy;
+      else if (farThreat > ga3 * 2 + 6) danger = farThreat;
+      if (!danger) return false;
 
       var limit = budget;
       while (moves.length < limit) {
@@ -377,9 +539,13 @@
         }
         if (step < 0 || !move(bestSrc, step, 'alert')) break;
       }
-      return armies[myGeneral] < threatArmy;
+      // 并完继续推进：站着等死比冲出去更亏
+      return false;
     }
 
+    // 已停用：每回合只有一条命令时，分层最大流的多源并流是负收益
+    // （吞吐=被搬那一格的兵减一，同时铺开的战线越多每条越慢）。
+    // 保留函数体是为了 bench-ab / 未来多回合规划还能调，主流程不再走这里。
     function transport() {
       if (!GB.flow) return;      var goal = pickGoal();
       var base = {
@@ -436,42 +602,10 @@
       return nearestEnemy >= 0 ? nearestEnemy : far;
     }
 
+    // 兜底：单栈推不动时（目标被山挡死之类）朝最近的敌人/最远处挪一步。
     function conveyor() {
       var goal = pickGoal();
-      if (goal < 0) return;
-      // 从目标反向 BFS 出步数场，朝 0 走
-      var dist = new Int32Array(n).fill(-1);
-      var queue = [goal];
-      dist[goal] = 0;
-      for (var h = 0; h < queue.length; h++) {
-        var cur = queue[h];
-        var list = nbr[cur];
-        for (var k = 0; k < list.length; k++) {
-          var j = list[k];
-          if (dist[j] !== -1 || !isPassable(owner, j)) continue;
-          dist[j] = dist[cur] + 1;
-          queue.push(j);
-        }
-      }
-      var order = [].concat(queue).sort(function (a, b) {
-        return armies[b] - armies[a];
-      });
-      for (var o = 0; o < order.length && moves.length < budget; o++) {
-        var i = order[o];
-        if (owner[i] !== pid || used.has(i) || armies[i] < 2) continue;
-        if (dist[i] <= 0) continue;
-        var nb = nbr[i];
-        var best = -1;
-        for (var k = 0; k < nb.length; k++) {
-          var j2 = nb[k];
-          if (dist[j2] === dist[i] - 1 && isPassable(owner, j2)) {
-            best = j2;
-            break;
-          }
-        }
-        if (best < 0) continue;
-        move(i, best, 'push');
-      }
+      if (goal >= 0) supply(goal);
     }
 
     GB.lastReasons = reasons;
