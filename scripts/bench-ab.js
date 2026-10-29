@@ -18,7 +18,8 @@ require('../src/bot.js');
 
 const GB = global.window.__GB;
 const T = GB.TILE;
-const TURNS = 200;
+// 每回合只有 1 条命令，所以回合预算要给足，否则大图根本走不完。
+const TURNS = 600;
 
 function buildClosed() {
   const w = 24;
@@ -93,7 +94,7 @@ function run(scn, useFlow) {
   const t0 = process.hrtime.bigint();
   for (let turn = 0; turn < TURNS; turn++) {
     S.turn = turn;
-    const moves = GB.bot.plan(S, { maxMoves: 6 });
+    const moves = GB.bot.plan(S, { maxMoves: 1 });
     totalMoves += moves.length;
     for (const m of moves) {
       const from = m[0];

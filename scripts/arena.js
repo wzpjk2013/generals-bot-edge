@@ -264,12 +264,15 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace) {
     }
     if (winner >= 0) break;
 
-    // 增长：地格 +1，自己占的城市隔回合再 +1
+    // 真实产兵（官方 bundle 常量 RECRUIT_RATE=2 / FARM_RATE=50）：
+    //   每 2 个半回合（=1 个显示回合）将军 +1、城市 +1、沼泽 -1；
+    //   每 50 个半回合（=25 个显示回合，即"一轮"）每个已占格 +1。
+    // 也就是说地盘本身几乎不产兵，兵源是将军和城市——这是 generals.io 的经济核心。
     for (let i = 0; i < N; i++) {
       const o = board.owner[i];
       if (o < 0) continue;
-      board.armies[i] += 1;
-      if (board.cities[i] && turn % 2 === 0) board.armies[i] += 1;
+      if (i === board.generals[o] || board.cities[i]) board.armies[i] += 1;
+      if (turn % 25 === 24) board.armies[i] += 1;
     }
   }
 
@@ -379,11 +382,9 @@ module.exports = { playGame: playGame, makeMap: makeMap };
 if (require.main === module) {
   const seeds = Number(process.argv[2] || 40);
   const OPPONENTS = ['random', 'expander', 'hunter', 'harvester'];
-  const MODES = [
-    { our: 1, ref: 1, label: '双方 1 步/回合（参考 bot 原生协议）' },
-    { our: 6, ref: 6, label: '双方 6 步/回合（本扩展默认预算）' },
-    { our: 6, ref: 1, label: '我方 6 步 / 对手 1 步（对手按原生协议）' }
-  ];
+  // 服务器每个半回合只从队列里消费一条攻击，所以每方每回合 1 条是唯一的真实赛制。
+  // 多预算对照留给 scripts/bench-budget.js，那里明确标注了是反事实实验。
+  const MODES = [{ our: 1, ref: 1, label: '真实赛制：每方每回合 1 步' }];
 
   console.log(
     '擂台：本扩展引擎 vs generals.io 参考 bot（' +

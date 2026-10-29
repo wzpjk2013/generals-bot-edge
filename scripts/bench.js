@@ -60,7 +60,7 @@ const t0 = process.hrtime.bigint();
 
 for (let turn = 0; turn < TURNS; turn++) {
   S.turn = turn;
-  const moves = GB.bot.plan(S, { maxMoves: 6 });
+  const moves = GB.bot.plan(S, { maxMoves: 1 });
   totalMoves += moves.length;
   for (const [from, to] of moves) {
     const a = S.armies[from];
