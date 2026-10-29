@@ -5,9 +5,30 @@ generals.io 的浏览器端机器人：读对局状态 → 每个半回合决策
 
 ## 装
 
+两种装法，选一种：
+
+**A. 从 Release 下载（推荐，不用 git）**
+
+1. 到 [Releases](../../releases) 下载最新的 `generals-autopilot-edge-<版本>.zip`，解压到一个固定目录（别放临时目录，Edge 会记住这个路径）。
+2. `edge://extensions` → 开发人员模式 →「加载解压缩的扩展」→ 选解压出来的文件夹（里面就有 `manifest.json` 和 `src/`）。
+
+**B. 直接用仓库目录**
+
 1. 打开 `edge://extensions`
 2. 打开「开发人员模式」
 3. 「加载解压缩的扩展」→ 选中本目录（含 `manifest.json` 的那一层）
+
+⚠️ 仓库目录里**不能出现 `_` 开头的文件或目录**（`_arena_*.txt` 这种擂台输出、`_msg.txt` 这种临时文件都不行）。
+Edge 把 `_` 开头当系统保留名，一撞上就是整包拒绝加载：
+
+```
+Cannot load extension with file or directory name _arena_blob_on.txt.
+```
+
+`npm test` 会先跑 `scripts/check-pack.js` 把这类的错拦下来。注意无头 Edge 用
+`--load-extension` 时**不会**报这个错（实测加了 `_zz_probe.txt` 照样加载成功），
+所以 e2e 拦不住，只能靠这个体检。
+
 4. 打开 <https://generals.io/>，右上角出现面板
 
 Chrome 同理（`chrome://extensions`）。需要 Chromium 111+：`content_scripts` 用了 `"world": "MAIN"`。
@@ -27,6 +48,24 @@ Chrome 同理（`chrome://extensions`）。需要 Chromium 111+：`content_scrip
 node scripts/bump-version.js          # 1.1.0 -> 1.1.1
 node scripts/bump-version.js minor    # -> 1.2.0
 node scripts/bump-version.js --check  # 只校验两边一致
+```
+
+## 发版
+
+```powershell
+node scripts/bump-version.js patch     # 涨版本（每次都涨，面板靠它认新旧）
+npm test                               # 含扩展目录体检 + 单测
+npm run zip                            # -> dist/generals-autopilot-edge-<版本>.zip
+gh release create v<版本> dist/generals-autopilot-edge-<版本>.zip --notes-file <说明.md>
+```
+
+zip 里只有跑扩展要的东西（`manifest.json` + `src/` + 根目录的 md），`scripts/`、`test/`、`.git` 不进包。
+`npm run zip` 自己写 ZIP（zlib + 手工目录），同版本重打字节一致，好对校验和。
+
+打完包顺手验证解压出来还能不能加载（`GB_EXT` 指到解压目录）：
+
+```powershell
+$env:GB_EXT="$env:TEMP\gbzip"; node scripts/e2e-check.js; Remove-Item Env:\GB_EXT
 ```
 
 ## 用
