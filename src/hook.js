@@ -25,7 +25,11 @@
   // 1 条：多发不会立刻生效，只会按回合排队，等于给未来回合灌过时命令。
   var settings = {
     enabled: true,
-    maxMoves: 1
+    maxMoves: 1,
+    // 面板位置（拖过才有；null = 默认右上角）和折叠状态，都存在 chrome.storage 里，
+    // 刷新页面 / 换一局都不会跳回去。
+    pos: null,
+    folded: false
   };
   GB.settings = settings;
 
@@ -234,38 +238,60 @@
   var PANEL = [
     '<style>',
     ':host{all:initial}',
-    '.box{position:fixed;top:70px;right:12px;z-index:2147483646;width:224px;',
-    'background:rgba(16,20,24,.92);color:#e6edf3;border:1px solid #39424d;border-radius:10px;',
-    'padding:9px 11px;font:12px/1.55 "Segoe UI",system-ui,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.45)}',
-    '.hd{display:flex;justify-content:space-between;align-items:center;cursor:pointer;',
-    'font-weight:600;color:#7fd1ff;letter-spacing:.02em}',
-    '.ver{color:#8c99a6;font-weight:400;font-size:11px;margin-left:6px}',
-    '.row{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:5px}',
+    '.box{position:fixed;top:70px;right:12px;z-index:2147483646;width:236px;box-sizing:border-box;',
+    'background:rgba(15,19,23,.94);color:#e6edf3;border:1px solid #333c46;border-radius:12px;',
+    'padding:0 11px 10px;font:12px/1.55 "Segoe UI",system-ui,sans-serif;',
+    'box-shadow:0 10px 28px rgba(0,0,0,.5);backdrop-filter:blur(6px);',
+    'transition:box-shadow .15s,border-color .15s;user-select:none}',
+    '.box.drag{border-color:#4f6c8a;box-shadow:0 16px 40px rgba(0,0,0,.6)}',
+    '.hd{display:flex;align-items:center;gap:7px;padding:8px 0 7px;margin:0 0 7px;',
+    'border-bottom:1px solid #262e37;font-weight:600;color:#7fd1ff;letter-spacing:.02em;',
+    'cursor:grab;touch-action:none}',
+    '.box.drag .hd{cursor:grabbing}',
+    '.grip{flex:0 0 auto;width:10px;height:14px;opacity:.45;',
+    'background-image:radial-gradient(currentColor 1px,transparent 1.1px);',
+    'background-size:5px 5px;background-repeat:repeat;background-position:0 0}',
+    '.title{flex:1 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '.ver{color:#8794a1;font-weight:400;font-size:11px;margin-left:6px}',
+    '.fold{flex:0 0 auto;width:16px;text-align:center;color:#8794a1;border-radius:4px;',
+    'cursor:pointer;line-height:16px}',
+    '.fold:hover{background:#2b333d;color:#cfe0ee}',
+    '.row{display:flex;justify-content:space-between;align-items:center;gap:8px;',
+    'min-height:22px;padding:1px 0}',
     '.k{color:#8c99a6;white-space:nowrap}',
-    '.v{color:#dbe6ef;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.v{color:#dbe6ef;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;',
+    'font-variant-numeric:tabular-nums}',
     '.sw{flex:0 0 auto;width:34px;height:18px;border-radius:9px;background:#3a434d;position:relative;',
     'cursor:pointer;transition:background .15s}',
     '.sw.on{background:#2f9e52}',
     '.sw i{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;',
     'background:#fff;transition:left .15s}',
     '.sw.on i{left:18px}',
-    'input{width:42px;background:#0b0f13;color:#e6edf3;border:1px solid #4a5560;border-radius:4px;',
-    'padding:1px 4px;font:inherit;text-align:right}',
+    'input{width:42px;background:#0b0f13;color:#e6edf3;border:1px solid #45505c;border-radius:5px;',
+    'padding:1px 5px;font:inherit;text-align:right;font-variant-numeric:tabular-nums}',
+    'input:focus{outline:none;border-color:#5b8db8}',
     '.err{color:#ff8a80}',
     '.ok{color:#5ddc85}',
     '.warn{color:#ffc857}',
     '.dim{color:#7d8894}',
+    '.sep{height:1px;background:#222a33;margin:7px 0 3px}',
+    '.hint{color:#5f6b77;font-size:10.5px;line-height:1.4;margin-top:6px}',
     '</style>',
-    '<div class="box">',
-    '  <div class="hd"><span>AutoPilot<span class="ver" id="ver"></span></span><span id="fold">−</span></div>',
+    '<div class="box" id="box">',
+    '  <div class="hd" id="hd" title="拖动移动 · 单击折叠 · 双击复位">',
+    '    <span class="grip"></span>',
+    '    <span class="title">AutoPilot<span class="ver" id="ver"></span></span>',
+    '    <span class="fold" id="fold">−</span>',
+    '  </div>',
     '  <div id="body">',
     '    <div class="row"><span class="k">启用</span><span class="sw" id="sw-enable"><i></i></span></div>',
-    '    <div class="row"><span class="k">每半回合步数</span><input id="in-max" type="number" min="1" max="2" step="1" title="服务器每个半回合只执行 1 条，显示回合 = 2 个半回合，上限 2"></div>',
     '    <div class="row"><span class="k">状态</span><span class="v" id="st">未开局</span></div>',
     '    <div class="row"><span class="k">回合</span><span class="v" id="st2">-</span></div>',
     '    <div class="row"><span class="k">地块 / 兵力</span><span class="v" id="st3">-</span></div>',
-    '    <div class="row"><span class="k">事件 / 决策 / 下发</span><span class="v" id="st6">0 / 0 / 0</span></div>',
     '    <div class="row"><span class="k">最近</span><span class="v" id="st5">-</span></div>',
+    '    <div class="sep"></div>',
+    '    <div class="row"><span class="k">每半回合步数</span><input id="in-max" type="number" min="1" max="2" step="1" title="服务器每个半回合只执行 1 条，显示回合 = 2 个半回合，上限 2"></div>',
+    '    <div class="row"><span class="k">事件 / 决策 / 下发</span><span class="v" id="st6">0 / 0 / 0</span></div>',
     '  </div>',
     '</div>'
   ].join('');
@@ -279,6 +305,146 @@
     node.classList.toggle('on', !!on);
   }
 
+  /* ---------------- 拖动 / 折叠（位置和折叠状态都存进 chrome.storage） ---------------- */
+
+  var DRAG_MIN = 4; // 超过这个位移才算拖动，否则算点击（用于折叠）
+  var EDGE = 4; // 离视口边缘至少留这么多
+
+  function clampPos(x, y, w, h) {
+    var maxX = Math.max(EDGE, window.innerWidth - w - EDGE);
+    var maxY = Math.max(EDGE, window.innerHeight - h - EDGE);
+    return {
+      x: Math.min(Math.max(EDGE, Math.round(x)), maxX),
+      y: Math.min(Math.max(EDGE, Math.round(y)), maxY)
+    };
+  }
+
+  function applyPos(box, pos) {
+    if (!box) return;
+    if (!pos || typeof pos.x !== 'number' || typeof pos.y !== 'number') {
+      // 没存过位置就用默认右上角
+      box.style.left = '';
+      box.style.top = '70px';
+      box.style.right = '12px';
+      return;
+    }
+    var r = box.getBoundingClientRect();
+    var p = clampPos(pos.x, pos.y, r.width || 236, r.height || 120);
+    box.style.right = 'auto';
+    box.style.left = p.x + 'px';
+    box.style.top = p.y + 'px';
+  }
+
+  function setFolded(folded) {
+    if (!ui) return;
+    ui.folded = !!folded;
+    ui.body.style.display = ui.folded ? 'none' : '';
+    ui.fold.textContent = ui.folded ? '+' : '−';
+    settings.folded = ui.folded;
+    // 折叠后高度变了，位置要重新夹一下，免得头露到视口外
+    applyPos(ui.box, settings.pos);
+  }
+
+  function wireDrag(box, hd) {
+    var start = null;
+    var clickTimer = null;
+
+    function resetPos() {
+      settings.pos = null;
+      postSettings();
+      applyPos(box, null);
+    }
+
+    function toggleFold() {
+      setFolded(!ui.folded);
+      postSettings();
+    }
+
+    // 单击折叠 / 双击复位。双击的第一下不能立刻折叠，所以延后 220ms 再判。
+    function onClick() {
+      if (clickTimer) {
+        clearTimeout(clickTimer);
+        clickTimer = null;
+        resetPos();
+        return;
+      }
+      clickTimer = setTimeout(function () {
+        clickTimer = null;
+        toggleFold();
+      }, 220);
+    }
+
+    hd.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0) return;
+      var r = box.getBoundingClientRect();
+      start = {
+        x: e.clientX,
+        y: e.clientY,
+        left: r.left,
+        top: r.top,
+        w: r.width,
+        h: r.height,
+        moved: false
+      };
+      ui.dragging = true;
+      try {
+        hd.setPointerCapture(e.pointerId);
+      } catch (err) {
+        /* 老浏览器没有指针捕获也能拖，只是离开元素会断 */
+      }
+      e.preventDefault(); // 别让浏览器开始选文字 / 拖拽图片
+    });
+
+    hd.addEventListener('pointermove', function (e) {
+      if (!start) return;
+      var dx = e.clientX - start.x;
+      var dy = e.clientY - start.y;
+      if (!start.moved && Math.abs(dx) + Math.abs(dy) < DRAG_MIN) return;
+      if (!start.moved) {
+        start.moved = true;
+        box.classList.add('drag');
+      }
+      var p = clampPos(start.left + dx, start.top + dy, start.w, start.h);
+      box.style.right = 'auto';
+      box.style.left = p.x + 'px';
+      box.style.top = p.y + 'px';
+    });
+
+    function end(e) {
+      if (!start) return;
+      var s = start;
+      start = null;
+      ui.dragging = false;
+      box.classList.remove('drag');
+      try {
+        hd.releasePointerCapture(e.pointerId);
+      } catch (err) {
+        /* 忽略 */
+      }
+      if (s.moved) {
+        // 拖完记住位置
+        var r = box.getBoundingClientRect();
+        settings.pos = { x: Math.round(r.left), y: Math.round(r.top) };
+        postSettings();
+      } else {
+        onClick();
+      }
+    }
+
+    hd.addEventListener('pointerup', end);
+    hd.addEventListener('pointercancel', function (e) {
+      if (!start) return;
+      start = null;
+      ui.dragging = false;
+      box.classList.remove('drag');
+    });
+
+    // 视口缩放后重新夹一下，别让面板跑到屏幕外
+    window.addEventListener('resize', function () {
+      if (settings.pos) applyPos(box, settings.pos);
+    });
+  }
+
   function ensureUI() {
     if (ui || !document.body) return;
     var host = document.createElement('div');
@@ -289,6 +455,8 @@
 
     ui = {
       root: root,
+      box: el(root, 'box'),
+      hd: el(root, 'hd'),
       enabled: el(root, 'sw-enable'),
       max: el(root, 'in-max'),
       ver: el(root, 'ver'),
@@ -298,7 +466,8 @@
       st5: el(root, 'st5'),
       st6: el(root, 'st6'),
       body: el(root, 'body'),
-      fold: el(root, 'fold')
+      fold: el(root, 'fold'),
+      folded: false
     };
 
     ui.enabled.addEventListener('click', function () {
@@ -313,12 +482,15 @@
       postSettings();
       refresh();
     });
-    var folded = false;
-    el(root, 'fold').parentNode.addEventListener('click', function () {
-      folded = !folded;
-      ui.body.style.display = folded ? 'none' : '';
-      ui.fold.textContent = folded ? '+' : '−';
+    // 折叠按钮单独接：拖动逻辑里已经处理了「拖到就移动、没拖就折叠」，
+    // 这里再挂一次是为了键盘 / 触摸下点击也稳。
+    ui.fold.addEventListener('click', function (e) {
+      e.stopPropagation();
     });
+
+    wireDrag(ui.box, ui.hd);
+    applyPos(ui.box, settings.pos);
+    setFolded(!!settings.folded);
 
     refresh();
   }
@@ -396,6 +568,14 @@
     if (typeof s.enabled === 'boolean') settings.enabled = s.enabled;
     if (Number.isInteger(s.maxMoves) && s.maxMoves >= 1 && s.maxMoves <= 2) {
       settings.maxMoves = s.maxMoves;
+    }
+    if (s.pos === null) settings.pos = null;
+    else if (s.pos && typeof s.pos.x === 'number' && typeof s.pos.y === 'number') settings.pos = s.pos;
+    if (typeof s.folded === 'boolean') settings.folded = s.folded;
+    // 隔一秒来一次的 settings 回包不该把用户刚拖的位置弹回去
+    if (ui && !ui.dragging) {
+      applyPos(ui.box, settings.pos);
+      if (ui.folded !== settings.folded) setFolded(settings.folded);
     }
     refresh();
   });

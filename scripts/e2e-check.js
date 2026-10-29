@@ -66,6 +66,56 @@ const manifestVersion = JSON.parse(fs.readFileSync(path.join(EXT, 'manifest.json
        })()`
     );
 
+    // 拖动：用真实鼠标事件拖标题栏，看面板是不是真的跟着走
+    const rect = await evaluate(
+      cdp,
+      `(function(){
+         var h = document.getElementById('gb-autopilot-host');
+         if (!h) return null;
+         var b = h.shadowRoot.getElementById('box');
+         var hd = h.shadowRoot.getElementById('hd');
+         var rb = b.getBoundingClientRect();
+         var rh = hd.getBoundingClientRect();
+         return { box: { left: rb.left, top: rb.top, w: rb.width, h: rb.height },
+                  hd: { x: rh.left + rh.width / 2, y: rh.top + rh.height / 2 } };
+       })()`
+    );
+    if (rect) {
+      const from = rect.hd;
+      const to = { x: Math.max(20, from.x - 140), y: from.y + 60 };
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: from.x, y: from.y, button: 'left', clickCount: 1, buttons: 1 });
+      for (let i = 1; i <= 6; i++) {
+        const t = i / 6;
+        await cdp.send('Input.dispatchMouseEvent', {
+          type: 'mouseMoved',
+          x: from.x + (to.x - from.x) * t,
+          y: from.y + (to.y - from.y) * t,
+          button: 'left',
+          buttons: 1
+        });
+        await sleep(16);
+      }
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: to.x, y: to.y, button: 'left', clickCount: 1, buttons: 0 });
+      await sleep(200);
+      const after = await evaluate(
+        cdp,
+        `(function(){
+           var h = document.getElementById('gb-autopilot-host');
+           var b = h.shadowRoot.getElementById('box');
+           var r = b.getBoundingClientRect();
+           return { left: r.left, top: r.top, inlineLeft: b.style.left, inlineTop: b.style.top,
+                    folded: h.shadowRoot.getElementById('body').style.display === 'none' };
+         })()`
+      );
+      report.drag = {
+        before: { left: Math.round(rect.box.left), top: Math.round(rect.box.top) },
+        after: { left: Math.round(after.left), top: Math.round(after.top) },
+        inline: after.inlineLeft + '/' + after.inlineTop,
+        moved: Math.abs(after.left - rect.box.left) > 20 || Math.abs(after.top - rect.box.top) > 20,
+        accidentallyFolded: after.folded
+      };
+    }
+
     report.errors = cdp.events
       .filter((e) => e.method === 'Runtime.exceptionThrown')
       .map((e) => (e.params.exceptionDetails.exception || {}).description || e.params.exceptionDetails.text)
@@ -84,6 +134,8 @@ const manifestVersion = JSON.parse(fs.readFileSync(path.join(EXT, 'manifest.json
     }
     if (report.status !== '未开局') problems.push('没开局时状态应是「未开局」，实际 ' + JSON.stringify(report.status));
     if (report.trap === 'miss') problems.push('socket 陷阱没命中');
+    if (report.drag && !report.drag.moved) problems.push('面板拖不动：拖动后位置没变 ' + JSON.stringify(report.drag));
+    if (report.drag && report.drag.accidentallyFolded) problems.push('拖动把面板折起来了（点击/拖动没有分开）');
     report.problems = problems;
 
     console.log(JSON.stringify(report, null, 2));
