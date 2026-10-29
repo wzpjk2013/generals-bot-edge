@@ -9,6 +9,7 @@
     "e2e": "node scripts/e2e-check.js && node scripts/e2e-pipeline.js",
     "pk": "node scripts/pk-report.js",
     "smoke": "node scripts/refbots/smoke.js",
-    "bump": "node scripts/bump-version.js"
+    "bump": "node scripts/bump-version.js",
+    "zip": "node scripts/zip-release.js"
   }
 }

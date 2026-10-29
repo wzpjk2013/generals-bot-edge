@@ -16,7 +16,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { launch, getTarget, client, evaluate, serveStub, shutdown, sleep } = require('./cdp');
 
-const EXT = path.resolve(__dirname, '..');
+// GB_EXT 可以指向别的目录——用来验证打包出来的 zip 解压后还能不能加载
+const EXT = process.env.GB_EXT ? path.resolve(process.env.GB_EXT) : path.resolve(__dirname, '..');
 const PORT = 9333;
 
 const STUB_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>generals stub</title></head>
