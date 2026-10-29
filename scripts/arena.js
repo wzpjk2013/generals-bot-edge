@@ -55,6 +55,23 @@ function neighbors(i) {
   return out;
 }
 
+/* 八邻（含斜角）：官方 _precomputeMapVisibilityLookups 里视野是 movableLookup + 四个
+ * 斜角 + 自己，也就是「己方格所在 3x3」 */
+function neighbors9(i) {
+  const out = [i];
+  const x = i % W;
+  const y = (i / W) | 0;
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx >= 0 && nx < W && ny >= 0 && ny < H) out.push(ny * W + nx);
+    }
+  }
+  return out;
+}
+
 function distField(from, passable) {
   const d = new Int32Array(N).fill(-1);
   const q = [from];
@@ -150,20 +167,33 @@ function applyMove(board, me, from, to, split) {
   return true;
 }
 
-function makeView(board, me, fog) {
+function makeView(board, me, fog, vis) {
   const generals = new Uint8Array(N);
-  const enemyGen = board.generals[1 - me];
-  // 迷雾下：看不见的敌将位置就是 -1（服务器直接不发）
   const myGen = board.generals[me];
+  const enemyGen = board.generals[1 - me];
   if (myGen >= 0) generals[myGen] = 1;
-  if (!fog || fog.seen[enemyGen]) generals[enemyGen] = 1;
+  // 服务器 t.generals.map(t => mask[t] & bit ? t : -1)：看不见就是 -1
+  if (!fog || vis[enemyGen]) generals[enemyGen] = 1;
+
+  // 城市同理：cities_diff 里只下发看得见的城，其余位置在 map 里退化成
+  // TILE_FOG_OBSTACLE（和山一模一样），所以客户端既不知道那是不是城，也不知道兵数。
+  let cities = board.cities;
+  let mountains = board.mountains;
+  if (fog) {
+    cities = new Uint8Array(N);
+    mountains = new Uint8Array(N);
+    for (let i = 0; i < N; i++) {
+      if (vis[i] && board.cities[i]) cities[i] = 1;
+      if (fog.owner[i] === T.FOG_OBSTACLE) mountains[i] = 1;
+    }
+  }
   return {
     w: W,
     h: H,
     armies: fog ? fog.armies : board.armies,
     owner: fog ? fog.owner : board.owner,
-    cities: board.cities,
-    mountains: board.mountains,
+    cities,
+    mountains,
     generals,
     me,
     general: myGen
@@ -179,18 +209,27 @@ function syncState(S, board, pid) {
  * 迷雾。
  *
  * 官方服务器在 sendGameUpdate 里按视野过滤后才下发（this.map.serialized 里
- * 不可见格写成 TILE_FOG / TILE_FOG_OBSTACLE、兵数抹成 0），所以客户端拿到的
- * 是「最后已知状态」，不是全图。视野规则取自 Map.computeVisibility：
- *   自己的每个格 + 它的四邻；城市则对所有玩家永久可见。
+ * 不可见格写成 TILE_FOG / TILE_FOG_OBSTACLE、兵数抹成 0），客户端拿到的是
+ * 「当前这一回合看得见的东西」，没有任何记忆。
  *
- * 这里按同一套规则给每一方维护一份 lastSeen：可见就刷新，不可见就冻结在最后
- * 一次看到的样子（官方客户端也是这么显示灰掉的格子的）。
+ * 视野规则（Map.computeVisibility + _precomputeMapVisibilityLookups）：
+ *   自己的每个格，加上它的 3x3（四邻 + 四个斜角）。
+ *   城市不额外可见——computeVisibility 里那句 A[lights[i]] = u 是给 lights 的，
+ *   不是 cities。看不见的城市在 serialized 末尾被改写成 TILE_FOG_OBSTACLE：
+ *
+ *     for (A = 0; A < n.length; A++) { … }
+ *     for (A = 0; A < cities.length; A++) {
+ *       var d = perm[cities[A]];
+ *       if (f[d + u] === TILE_FOG) f[d + u] = TILE_FOG_OBSTACLE;
+ *     }
+ *
+ *   所以「没见过的城市」在客户端眼里和山完全一样，只有站到旁边才认得出来。
  */
 function makeFog() {
   return {
-    owner: new Int16Array(N).fill(T.EMPTY),
+    owner: new Int16Array(N).fill(T.FOG),
     armies: new Int32Array(N).fill(0),
-    seen: new Uint8Array(N)
+    seen: new Uint8Array(N) // 只在 bot 侧当「人脑记忆」用，参考 bot 不给
   };
 }
 
@@ -198,15 +237,18 @@ function updateFog(fog, board, me) {
   const vis = new Uint8Array(N);
   for (let i = 0; i < N; i++) {
     if (board.owner[i] !== me) continue;
-    vis[i] = 1;
-    for (const j of neighbors(i)) vis[j] = 1;
+    for (const j of neighbors9(i)) vis[j] = 1;
   }
   for (let i = 0; i < N; i++) {
-    if (board.cities[i]) vis[i] = 1; // 城市位置所有人可见
-    if (!vis[i]) continue;
-    fog.seen[i] = 1;
-    fog.owner[i] = board.owner[i];
-    fog.armies[i] = board.armies[i];
+    if (vis[i]) {
+      fog.seen[i] = 1;
+      fog.owner[i] = board.owner[i];
+      fog.armies[i] = board.armies[i];
+    } else {
+      // isObstacle() = 山 / 观测站 / 瞭望塔；城市不在里面，是被末尾那段单独改写的
+      fog.owner[i] = board.mountains[i] || board.cities[i] ? T.FOG_OBSTACLE : T.FOG;
+      fog.armies[i] = 0;
+    }
   }
   return vis;
 }
@@ -253,12 +295,12 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
   const states = [s0, s1];
   const fogs = useFog ? [makeFog(), makeFog()] : null;
   if (fogs) {
-    // 开局：将军和地图本身一开始就可见（官方 game_start 带 map 全量，之后才按视野过滤）
+    // 开局就要过滤：官方 game_start 不带 map，地图是随后第一个 game_update 里按视野下的
     for (const p of [0, 1]) updateFog(fogs[p], board, p);
   }
 
   const refRng = mulberry32(seed ^ 0x9e3779b9);
-  const ref = makeRefAgent(opponent, refRng);
+  const ref = opponent === 'engine' ? null : makeRefAgent(opponent, refRng);
 
   let winner = -1;
   let turns = 0;
@@ -267,17 +309,20 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     turns = turn + 1;
 
-    const order = oursSide === 0 ? [0, 1] : [1, 0];
+    // 走子顺序按玩家下标固定，和服务器 getPlayerMovesPriorityV2 一致（每个 tick
+    // 按下标依次各取一条命令）。以前按「我方先走」排，等于每一局都在让先手——
+    // 后手能看着你这步回应，实测先手方只赢 42.6%，白白吃了个系统性偏差。
+    const order = [0, 1];
     for (const p of order) {
       const me = p;
       if (board.owner[board.generals[me]] !== me) continue; // 已经死了
       const enemy = 1 - me;
       // 迷雾下先按这一方当前的视野刷新 lastSeen，再让双方各自读自己的那份
-      if (fogs) updateFog(fogs[p], board, p);
-      const view = makeView(board, me, fogs ? fogs[p] : null);
+      const vis = fogs ? updateFog(fogs[p], board, p) : null;
+      const view = makeView(board, me, fogs ? fogs[p] : null, vis);
 
-      if (p === oursSide) {
-        // 我们：引擎一次给出整回合的计划
+      if (p === oursSide || opponent === 'engine') {
+        // 引擎侧：一次给出整回合的计划（opponent === 'engine' 时两边都是引擎，镜像局）
         if (fogs) {
           states[p].terrain.set(fogs[p].owner);
           states[p].armies.set(fogs[p].armies);
@@ -286,15 +331,24 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
           states[p].generals = [0, 1].map((q) => {
             const g = board.generals[q];
             if (q === p) return g;
-            return fogs[p].seen[g] ? g : -1;
+            return vis[g] ? g : -1;
           });
+          // 城市同理：cities_diff 只给当前看得见的城，看不见的从表的里摘掉，
+          // 那一格在 map 里退化成 FOG_OBSTACLE。引擎要是还拿着全量城市表，
+          // 就等于作弊知道五座城在哪。
+          states[p].cities = [];
+          for (let ci = 0; ci < N; ci++) {
+            if (board.cities[ci] && vis[ci]) states[p].cities.push(ci);
+          }
         } else {
           syncState(states[p], board, p);
         }
         // 引擎里的 S.turn 是服务器 tick（半个显示回合一个 tick），这里对齐成
         // tick 单位，否则按阶段划分的阈值会被慢放一倍。
         states[p].turn = turn * 2;
-        const enginePlan = Object.assign({}, engineCfg, { maxMoves: ourBudget });
+        // 镜像 AB 用：非我方那半边可以吃一套不同的参数（opts.cfg2）
+        const baseCfg = p === oursSide ? engineCfg : (opts && opts.cfg2) || engineCfg;
+        const enginePlan = Object.assign({}, baseCfg, { maxMoves: ourBudget });
         const moves = GB.bot.plan(states[p], enginePlan);
         if (!moves.length) idleTurns++;
         if (trace) {
@@ -478,7 +532,7 @@ if (require.main === module) {
   console.log(
     '视野：' +
       (opts.fog
-        ? '真实迷雾（每方只能看自己的领土 + 四邻；城市全局可见；看不见的格子冻结在最后已知状态）'
+        ? '真实迷雾（每方只能看自己领土的 3x3；看不见的城市退化成和山一样的障碍；无记忆）'
         : '全视野（作弊版，官方服务器实际会按视野过滤）') +
       '\n'
   );
