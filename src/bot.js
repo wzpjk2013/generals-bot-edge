@@ -123,7 +123,7 @@
     }
     var myGeneral = pid < generals.length && generals[pid] >= 0 ? generals[pid] : -1;
 
-    var budget = Math.max(1, Math.min(20, ((cfg && cfg.maxMoves) | 0) || 6));
+    var budget = Math.max(1, Math.min(20, ((cfg && cfg.maxMoves) | 0) || 1));
     var used = new Set();
     var moves = [];
     var reasons = [];

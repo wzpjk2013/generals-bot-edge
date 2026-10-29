@@ -15,14 +15,21 @@
   var state = new GB.GameState();
   GB.state = state;
 
+  // 服务器每个半回合（内部 turn）只从每个玩家的 inputBuffer 里取一条攻击执行
+  // （bundle 里 getPlayerMovesPriorityV2 取完一条就 break），屏幕上的一个回合
+  // = 2 个半回合，所以真实上限是 2 条/回合。我们每个半回合都重新决策，只下发
+  // 1 条：多发不会立刻生效，只会按回合排队，等于给未来回合灌过时命令。
   var settings = {
     enabled: true,
-    maxMoves: 6
+    maxMoves: 1
   };
   GB.settings = settings;
 
   var stats = { moves: 0, last: '-', blocked: '', error: '' };
   var lastDrive = { turn: -1, at: 0 };
+  // 第 4 个参数是官方前端的 attackIndex（单调递增序号），不是 turn。
+  // 服务端只做 Math.max 推进，所以本地自增即可。
+  var attackSeq = 0;
   var socketRef = null;
   var ui = null;
 
@@ -56,7 +63,6 @@
     lastDrive.turn = S.turn;
     lastDrive.at = now;
 
-    var turn = S.turn;
     var moves;
     try {
       moves = GB.bot.plan(S, settings);
@@ -67,24 +73,16 @@
     }
     if (!moves.length || !socketRef) return;
 
-    // 同回合内错开发包，避免瞬间打爆 socket
-    moves.forEach(function (mv, k) {
-      setTimeout(function () {
-        try {
-          socketRef.emit('attack', mv[0], mv[1], false, turn);
-        } catch (e) {
-          stats.error = 'emit: ' + ((e && e.message) || e);
-        }
-      }, k * 35);
-    });
+    // 每个半回合只下发一条；服务端本回合也只消费一条，多发只会积压成过时命令。
+    var mv = moves[0];
+    try {
+      socketRef.emit('attack', mv[0], mv[1], false, attackSeq++);
+    } catch (e) {
+      stats.error = 'emit: ' + ((e && e.message) || e);
+    }
 
-    stats.moves += moves.length;
-    stats.last = moves
-      .slice(0, 3)
-      .map(function (m) {
-        return m[0] + '>' + m[1];
-      })
-      .join(' ');
+    stats.moves += 1;
+    stats.last = mv[0] + '>' + mv[1];
   }
 
   // 事件处理集中在这里：socket 订阅和 GB.feed（调试/自动化注入）走同一份
@@ -184,7 +182,7 @@
     '  <div class="hd"><span>Generals AutoPilot</span><span id="fold">−</span></div>',
     '  <div id="body">',
     '    <div class="row"><span class="k">启用</span><span class="sw" id="sw-enable"><i></i></span></div>',
-    '    <div class="row"><span class="k">每回合步数</span><input id="in-max" type="number" min="1" max="20" step="1"></div>',
+    '    <div class="row"><span class="k">每半回合步数</span><input id="in-max" type="number" min="1" max="2" step="1" title="服务器每个半回合只执行 1 条，显示回合 = 2 个半回合，上限 2"></div>',
     '    <div class="row"><span class="k">状态</span><span class="v" id="st">等待连接</span></div>',
     '    <div class="row"><span class="k">回合</span><span class="v" id="st2">-</span></div>',
     '    <div class="row"><span class="k">地块 / 兵力</span><span class="v" id="st3">-</span></div>',
@@ -231,7 +229,7 @@
     });
     ui.max.addEventListener('change', function () {
       var v = parseInt(ui.max.value, 10);
-      if (!(v >= 1 && v <= 20)) v = 6;
+      if (!(v >= 1 && v <= 2)) v = 1;
       settings.maxMoves = v;
       postSettings();
       refresh();
@@ -290,7 +288,7 @@
     if (e.source !== window || !d || d.__gb !== 'settings') return;
     var s = d.settings || {};
     if (typeof s.enabled === 'boolean') settings.enabled = s.enabled;
-    if (Number.isInteger(s.maxMoves) && s.maxMoves >= 1 && s.maxMoves <= 20) {
+    if (Number.isInteger(s.maxMoves) && s.maxMoves >= 1 && s.maxMoves <= 2) {
       settings.maxMoves = s.maxMoves;
     }
     refresh();

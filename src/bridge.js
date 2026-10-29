@@ -6,14 +6,14 @@
 (function () {
   'use strict';
 
-  var DEFAULTS = { enabled: true, maxMoves: 6 };
+  var DEFAULTS = { enabled: true, maxMoves: 1 };
   var KEY = 'gbSettings';
 
   function withDefaults(s) {
     var out = { enabled: DEFAULTS.enabled, maxMoves: DEFAULTS.maxMoves };
     if (s && typeof s === 'object') {
       if (typeof s.enabled === 'boolean') out.enabled = s.enabled;
-      if (Number.isInteger(s.maxMoves) && s.maxMoves >= 1 && s.maxMoves <= 20) out.maxMoves = s.maxMoves;
+      if (Number.isInteger(s.maxMoves) && s.maxMoves >= 1 && s.maxMoves <= 2) out.maxMoves = s.maxMoves;
     }
     return out;
   }
