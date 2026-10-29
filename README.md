@@ -102,6 +102,8 @@ scripts/e2e-pipeline.js 全链路：注入对局 → 机器人下发 attack
 scripts/bench.js        32x32 跑 200 回合的耗时与扩张基准
 scripts/bench-ab.js     推土机 vs 最大流的 A/B
 scripts/bench-net.js    AverageJoe 网络单次前向延迟
+scripts/refagents.js    参考 bot 移植（random / expander / hunter / harvester）
+scripts/arena.js        与参考 bot 的 1v1 擂台
 ```
 
 ## 测
@@ -113,6 +115,7 @@ node test/net.test.js        # 网络移植：形状、掩码、patch 映射、�
 node scripts/bench.js        # 单回合决策耗时 + 200 回合扩张率
 node scripts/bench-ab.js     # 推土机 vs 最大流：打穿硬骨头的回合数
 node scripts/bench-net.js    # AverageJoe 单次前向延迟（L / S 两档）
+node scripts/arena.js 40     # 与参考 bot 的 960 局 PK（每格 40 种子 × 先后手）
 node scripts/e2e-check.js    # 需要本机 Edge，自动起 headless
 node scripts/e2e-pipeline.js # 未打包加载 + 合成对局，断言 attack 参数形状
 ```
@@ -134,6 +137,55 @@ A/B（`bench-ab.js`，200 回合，指标是那块硬骨头被打穿的回合数
 ```
 
 `e2e-pipeline` 用 `GB.feed(name, payload)` 注入——和 socket 订阅走同一份 handler，不用真进对局。
+
+## PK：和参考 bot 打
+
+`scripts/arena.js` 起一个 20×20 全视野 1v1 的擂台，对手是
+[`generals-bots`](https://github.com/strakam/generals-bots) 里四个 agent 的 JS 移植
+（`scripts/refagents.js`，BFS 步数场 / 方向场 / 斩首优先级 / 城市当墙这些判定全部照抄）。
+
+规则按真实对局走：地格每回合 +1、自己占的城市隔回合再 +1、一格一回合只能动一次、
+打出去的兵留 1 个在家、吃掉对方将军即胜、1000 回合未分胜负算和。
+每个种子打两局（先后手互换）。每个格子 80 局。
+
+```
+== 双方 1 步/回合（参考 bot 的原生协议） ==
+  对手          局数   胜   负   和    胜率   平均回合   我方地  对方地   我方兵  对方兵
+  random         80   80    0    0  100.0%     203     185     20    25005    3314
+  expander       80   69   10    1   86.3%     480     233     75    65934   18588
+  hunter         80   38   42    0   47.5%      50      39     16     1063     330
+  harvester      80   42   38    0   52.5%      53      41     17     1278     359
+
+== 双方 6 步/回合（本扩展的默认预算） ==
+  random         80   80    0    0  100.0%      67     206     30     6669    1479
+  expander       80   65   15    0   81.3%      95     188    116     7392    6130
+  hunter         80   19   61    0   23.8%      23      33     17      347      65
+  harvester      80   19   61    0   23.8%      23      33     17      350      66
+
+== 我方 6 步 / 对手 1 步（对手按原生协议） ==
+  random         80   80    0    0  100.0%      58     179     10     5526     447
+  expander       80   80    0    0  100.0%      78     241     28     8454    1292
+  hunter         80   75    5    0   93.8%      42     106      9     2278     183
+  harvester      80   75    5    0   93.8%      40     102      9     2071     206
+```
+
+两点结论，都是这套数据直接量出来的：
+
+1. **对 hunter / harvester 不占优。** 在各自的原生协议（1 步/回合）是 47.5% / 52.5%，
+   基本五五开；给双方都发 6 步则掉到 23.8%。hunter 的策略本质是「把兵攒成一条蛇」，
+   每多一个动作，它的蛇就多推一格——6 个动作等于整条蛇每回合前进 6 格，收益是超线性的，
+   而我们的引擎把多出来的动作花在了多占几格上。
+2. **对 random / expander 是碾压。** 200~500 回合的消耗战里领地 233:75、兵力 65934:18588，
+   因为 Dijkstra 能绕山、能挑目标，而 expander 只看相邻格。
+
+为此加了两处改动（都在 `src/bot.js`）：B2 预警守将（将军 12 步内出现比我厚的敌军就
+把 5 步内最厚的几堆并回来，并完还挡不住就整回停止扩张），以及 `POKE_MARGIN`
+（兵力不够富余时不拿 2 个兵去戳敌方地块）。这两条把 6 步赛制下对 hunter 的胜率从
+2/20 拉到 8/20（20 种子样本），但没解决根本问题。
+
+已知没解决：**对上已经成型的蛇，我们的应对是「回头并兵」，而正确解法大概是「提前
+把兵攒成同等的蛇」**——那需要把引擎从「每回合最大化即时收益」改成「维护一条主攻
+纵队」，是结构性改动，不是调参。
 
 ## 已知限制
 
