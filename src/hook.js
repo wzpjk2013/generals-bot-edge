@@ -94,9 +94,11 @@
     if (!moves.length || !socketRef) return;
 
     // 每个半回合只下发一条；服务端本回合也只消费一条，多发只会积压成过时命令。
+    // mv[2] 是「只送一半」（协议里的 is50）：引擎按一半算的账必须原样告诉服务器，
+    // 否则本地以为将军留了一半、服务器把它全送出去，下一步就全是空过。
     var mv = moves[0];
     try {
-      socketRef.emit('attack', mv[0], mv[1], false, attackSeq++);
+      socketRef.emit('attack', mv[0], mv[1], !!mv[2], attackSeq++);
       stats.snd += 1;
     } catch (e) {
       stats.error = 'emit: ' + ((e && e.message) || e);

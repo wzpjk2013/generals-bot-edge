@@ -138,7 +138,8 @@ test('空地扩张（沿路径推进）', () => {
   const S = makeState(3, 1, { 0: { owner: 0, army: 6 } }, { generals: [0] });
   const moves = GB.bot.plan(S, { maxMoves: 6 });
   assert.ok(moves.length >= 1);
-  assert.deepEqual(moves[0], [0, 1]);
+  assert.deepEqual(moves[0].slice(0, 2), [0, 1]);
+  assert.equal(moves[0][2], 0, '默认只送 a-1（is50=0）：协议给的两种送法里这个在镜像 A/B 里更强');
   validate(S, moves);
 });
 
@@ -152,7 +153,7 @@ test('优先吃城市', () => {
   // 1 是我方(10)，0 空地，2 城市(守军 3)
   const S = makeState(3, 1, { 1: { owner: 0, army: 10 }, 2: { city: true, army: 3 } });
   const moves = GB.bot.plan(S, { maxMoves: 6 });
-  assert.deepEqual(moves[0], [1, 2]);
+  assert.deepEqual(moves[0].slice(0, 2), [1, 2]);
   validate(S, moves);
 });
 
@@ -168,7 +169,8 @@ test('敌方将军贴脸直接斩首', () => {
     1: { owner: 1, army: 4 }
   }, { generals: [0, 1] });
   const moves = GB.bot.plan(S, { maxMoves: 6 });
-  assert.deepEqual(moves[0], [0, 1]);
+  assert.deepEqual(moves[0].slice(0, 2), [0, 1]);
+  assert.equal(moves[0][2], 0, '斩首要整队打出去，不能只送一半');
 });
 
 test('将军打不过就守，不乱送', () => {

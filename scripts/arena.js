@@ -360,8 +360,8 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
             ' 走=' + JSON.stringify(moves)
           );
         }
-        for (const [from, to] of moves) {
-          applyMove(board, me, from, to, false);
+        for (const m of moves) {
+          applyMove(board, me, m[0], m[1], !!m[2]);
           if (board.owner[board.generals[enemy]] === me) {
             winner = me;
             break;

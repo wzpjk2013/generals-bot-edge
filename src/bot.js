@@ -352,7 +352,9 @@
      * 所以保留代码、默认关闭，作为以后换地图/换节奏时的开关。
      */
     var useGarrison = C.garrison === true;
-    var genHalf = C.genHalf !== false;
+    // 将军出门是否只送一半。默认关：迷雾镜像 A/B 120 局里，留一半 33.0%、只留 1 67.0%。
+    // 协议只给了这两种送法（is50），没有「留 N 个」的写法，所以只能二选一。
+    var genHalf = C.genHalf === true;
     var need0 = useGarrison ? garrisonNeed() : 0;
 
     // 将军是否已经被对方看见（粘性）。任一敌格贴着将军，就等于他已经看见了。
@@ -410,9 +412,31 @@
       // 将军出兵要留底：一次送光，下一回合被贴脸就没得守了。
       // 早期例外——这时候只有将军有余粮，留着不推等于整局不动。
       var sent = a - 1;
-      // 将军出兵只送一半（strakam/hunter 的 split=1）。出门 4 留 4：兵源和推力
-      // 同时存在。全送等于把家底一次搬到前线，下一回合被贴脸就什么都没了。
-      if (genOut) sent = genHalf ? a >> 1 : a - Math.min(GARRISON, a >> 1);
+
+      /*
+       * 「将军出门只送一半」必须同时告诉服务器。
+       *
+       * 协议里只有两种送法（bundle 里 bufferAttack 就这两个分支）：
+       *   is50 = 1 → 送 army >> 1，留一半
+       *   is50 = 0 → 送 army - 1，只留 1
+       * 没有第三种。以前这里本地按一半算账、emit 时写死 false，于是本地以为将军留了
+       * 一半、服务器把它送到只剩 1，下一步本地就按「这格还有兵」继续下令——回放里
+       * t=22..26、t=33、t=44、t=46 那一串「源 1 兵送 0」全是这么来的空过。
+       *
+       * 现在 flag 和账必须一致：half 为真时才按一半算。
+       * 默认 genHalf 关（只留 1）：迷雾镜像 A/B 120 局，留一半 33.0%、留 1 67.0%——
+       * 留一半等于把将军的吞吐砍一半，而将军是开局唯一的稳定兵源。
+       * 打敌格（斩首/反打）一律整队出击，抠一半是送死。
+       */
+      var half = false;
+      var atk = owner[to] >= 0 && owner[to] !== pid;
+      if (genOut && !atk && genHalf) {
+        var h2 = a >> 1;
+        if (h2 >= 1) {
+          half = true;
+          sent = h2;
+        }
+      }
       if (sent < 1) return false;
       // 往自己的格子并兵永远合法（只损耗 1），往敌人格必须打得过
       if (!own && sent <= armies[to]) return false;
@@ -420,7 +444,7 @@
       armies[from] = a - sent;
       owner[to] = pid;
       used.add(from);
-      moves.push([from, to]);
+      moves.push([from, to, half ? 1 : 0]);
       if (why) reasons.push(why + ':' + from + '>' + to);
       return true;
     }
