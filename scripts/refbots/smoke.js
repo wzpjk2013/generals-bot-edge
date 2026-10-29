@@ -25,6 +25,9 @@ if (!name) {
 let probe;
 try {
   const agent = makeRefAgent(name, () => 0.5);
+  // generals 是逐格 flags（和 arena.makeView 一致），不是 [g0,g1]
+  const gens = new Uint8Array(9);
+  gens[4] = 1;
   const view = {
     w: 3,
     h: 3,
@@ -32,7 +35,7 @@ try {
     owner: Int16Array.from([-1, -1, -1, -1, 0, -1, -1, -1, -1]),
     cities: new Uint8Array(9),
     mountains: new Uint8Array(9),
-    generals: [4, -1],
+    generals: gens,
     me: 0,
     general: 4
   };

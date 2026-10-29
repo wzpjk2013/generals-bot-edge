@@ -1121,16 +1121,23 @@ function makeRefAgent(name, rng) {
   throw new Error('未知 agent: ' + name);
 }
 
-/* 强对手 = LocalGen-new 血统的那批；前五个 strakam/harris 的在迷雾下几乎不动，
- * 只留作「会动的基线」，不进 PK 合计。 */
-var STRONG = ['gc', 'szly'];
-var WEAK = ['random', 'expander', 'hunter', 'harvester', 'ladder'];
+/* 强对手 = LocalGen-new 血统里真的能压住引擎的那批，才是有意义的 PK 对象；
+ * 弱档（strakam/harris 的五个 + ktq/zlyv3）在迷雾下要么几乎不动、要么只会贪心扩张，
+ * 赢它们不说明任何问题，只留作「会动的基线」，GB_WEAK=1 才跑。 */
+var STRONG = ['gc', 'szly', 'zlyv21', 'xiaruize', 'kutu', 'oim'];
+var WEAK = ['random', 'expander', 'hunter', 'harvester', 'ladder', 'ktq', 'zlyv3'];
 
 function listRefAgents(kind) {
-  var strong = STRONG.concat(EXTRA.names);
+  // 内置的 gc/szly 在 refagents 里，其余从 refbots/ 自动发现；
+  // 自动发现的如果没在 STRONG/WEAK 里登记，一律当强对手（新移植的默认值得测）。
+  var strong = STRONG.slice();
+  var weak = WEAK.slice();
+  EXTRA.names.forEach(function (n) {
+    if (strong.indexOf(n) < 0 && weak.indexOf(n) < 0) strong.push(n);
+  });
   if (kind === 'strong') return strong;
-  if (kind === 'weak') return WEAK.slice();
-  return WEAK.concat(strong);
+  if (kind === 'weak') return weak;
+  return weak.concat(strong);
 }
 
 module.exports = {

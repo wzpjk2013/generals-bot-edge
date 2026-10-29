@@ -30,11 +30,22 @@ view = {
   owner: Int16Array(N),       // 格子归属：>=0 是玩家下标，负数见下面 T
   cities: Uint8Array(N),      // 1 = 自己**看得见**的城市
   mountains: Uint8Array(N),   // 1 = 障碍（山，或迷雾里看不见的城——区分不出来）
-  generals: [g0, g1],         // 看不见的对手将军是 -1
+  generals: Uint8Array(N),    // 逐格标志位！1 = 将军所在格（不是 [g0,g1] 这种下标数组）
   me,                         // 自己在这一局里的玩家下标，0 或 1
   general                     // 自己将军的下标
 }
 ```
+
+`generals` 是**逐格 flags**，照服务器 `t.generals.map(t => mask[t] & bit ? t : -1)` 的语义做的：
+看不见的对手将军那一格就是 0，不会给你留个 -1 占位。找敌将要么扫法，
+
+```js
+for (var i = 0; i < view.w * view.h; i++) {
+  if (view.generals[i] && view.owner[i] !== me) { /* 这一格是见过的敌将 */ }
+}
+```
+
+要么直接用 `view.general`（永远是自己的）。
 
 `owner` 里的负数常量：
 
@@ -45,7 +56,7 @@ T.LOOKOUT = -5, T.OBSERVATORY = -6
 
 注意：**迷雾是真的**。对手看到的和你我一样——只有自己领土的 3×3 范围，
 看不见的城市在 `owner` 里是 `T.FOG_OBSTACLE`、和山长得一模一样，
-没见过的敌将 `generals[q] === -1`。原版 C++ bot 是在全视野下写的，
+没见过的敌将在 `generals` 里就是 0。原版 C++ bot 是在全视野下写的，
 所以移植时凡是「按 id 查地图」的地方都要先过 `owner[i] < 0` 这道闸。
 
 ## 移植约定

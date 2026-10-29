@@ -184,7 +184,10 @@ function makeView(board, me, fog, vis) {
     mountains = new Uint8Array(N);
     for (let i = 0; i < N; i++) {
       if (vis[i] && board.cities[i]) cities[i] = 1;
-      if (fog.owner[i] === T.FOG_OBSTACLE) mountains[i] = 1;
+      // mountains 统一成「走不过去」的语义：看得见的山也算。
+      // 之前只在 owner === FOG_OBSTACLE 时置 1，导致**看得见的山** mountains[i]=0、
+      // 只有 owner=-2 能表明它是山——按 mountains 判障碍的移植 bot 会一头撞山白掉回合。
+      if (fog.owner[i] === T.FOG_OBSTACLE || board.mountains[i]) mountains[i] = 1;
     }
   }
   return {
