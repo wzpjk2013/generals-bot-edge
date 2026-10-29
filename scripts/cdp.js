@@ -55,9 +55,16 @@ function client(wsUrl) {
     let id = 0;
     const pending = new Map();
     const events = [];
+    const listeners = new Map();
     ws.onopen = () =>
       resolve({
         events,
+        // 事件回调（Fetch.requestPaused 之类要即时处理，不能只堆在 events 里）
+        on(method, fn) {
+          const arr = listeners.get(method) || [];
+          arr.push(fn);
+          listeners.set(method, arr);
+        },
         send(method, params = {}) {
           const msg = { id: ++id, method, params };
           ws.send(JSON.stringify(msg));
@@ -79,6 +86,8 @@ function client(wsUrl) {
         m.error ? rej(new Error(JSON.stringify(m.error))) : res(m.result);
       } else if (m.method) {
         events.push(m);
+        const arr = listeners.get(m.method);
+        if (arr) for (const fn of arr) fn(m.params);
       }
     };
   });
@@ -96,6 +105,41 @@ async function evaluate(cdp, expression) {
   return r.result.value;
 }
 
+/*
+ * 把 https://generals.io/* 换成自带的空壳 HTML。
+ *
+ * 这台机器经常连不上 generals.io（curl 直接超时），而 content_scripts 只按 URL 匹配，
+ * 所以只要让页面地址仍然是 https://generals.io/ 就够了——扩展照常注入，
+ * 依赖外网的只剩站点自己的前端，那部分不是被测对象。
+ */
+async function serveStub(cdp, html) {
+  const state = { offline: false };
+  await cdp.send('Fetch.enable', {
+    patterns: [{ urlPattern: 'https://generals.io/*', requestStage: 'Request' }]
+  });
+  cdp.on('Fetch.requestPaused', async (p) => {
+    try {
+      if (p.request && p.request.url.startsWith('https://generals.io/')) {
+        state.offline = true;
+        await cdp.send('Fetch.fulfillRequest', {
+          requestId: p.requestId,
+          responseCode: 200,
+          responseHeaders: [
+            { name: 'Content-Type', value: 'text/html; charset=utf-8' },
+            { name: 'Cache-Control', value: 'no-store' }
+          ],
+          body: Buffer.from(html, 'utf8').toString('base64')
+        });
+      } else {
+        await cdp.send('Fetch.continueRequest', { requestId: p.requestId });
+      }
+    } catch (e) {
+      /* 请求可能已经被取消了 */
+    }
+  });
+  return state;
+}
+
 async function shutdown(handle, cdp) {
   if (cdp) cdp.close();
   if (handle) {
@@ -109,4 +153,4 @@ async function shutdown(handle, cdp) {
   }
 }
 
-module.exports = { launch, getTarget, client, evaluate, shutdown, sleep };
+module.exports = { launch, getTarget, client, evaluate, serveStub, shutdown, sleep };

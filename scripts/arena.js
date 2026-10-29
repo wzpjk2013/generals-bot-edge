@@ -22,7 +22,7 @@ require('../src/state.js');
 require('../src/flow.js');
 require('../src/bot.js');
 
-const { makeRefAgent } = require('./refagents.js');
+const { makeRefAgent, listRefAgents } = require('./refagents.js');
 
 const GB = global.window.__GB;
 const T = GB.TILE;
@@ -420,6 +420,7 @@ function runCell(opponent, ourBudget, refBudget, seeds, engineCfg, opts) {
     enemyLand: 0,
     ourArmy: 0,
     enemyArmy: 0,
+    idleTurns: 0,
     skipped: 0
   };
   for (let s = 0; s < seeds; s++) {
@@ -432,6 +433,7 @@ function runCell(opponent, ourBudget, refBudget, seeds, engineCfg, opts) {
       }
       acc.games++;
       acc.turns += r.turns;
+      acc.idleTurns += r.idleTurns;
       acc.ourLand += r.ourLand;
       acc.enemyLand += r.enemyLand;
       acc.ourArmy += r.ourArmy;
@@ -509,9 +511,13 @@ if (require.main === module) {
   // 默认就是真实迷雾（服务器在数据层按视野过滤）。全视野是作弊版，只有显式
   // 写 GB_FOG=0 才给——它唯一还能用的地方是和旧数据对比。
   const opts = { fog: process.env.GB_FOG !== '0' };
-  // ladder = harrischristiansen/generals-bot 的移植，比 strakam 的三个基线强一个档；
-  // 它没有迷雾处理，所以迷雾下比全视野下弱得多（见 PK.md）。
-  const OPPONENTS = ['random', 'expander', 'hunter', 'harvester', 'ladder', 'gc', 'szly'];
+  // 对手分两档（定义在 refagents.js）：
+  //   弱：strakam / harrischristiansen 那批，没处理迷雾，迷雾下基本不动，只留作会动的基线
+  //   强：LocalGen-new 血统（gc / szly + scripts/refbots/ 下移植进来的），才是有意义的 PK 对象
+  // GB_OPP='gc,szly' 可以只跑指定的几个。
+  const OPPONENTS = process.env.GB_OPP
+    ? process.env.GB_OPP.split(',').map((s) => s.trim()).filter(Boolean)
+    : listRefAgents('all');
   // 服务器每个半回合只从队列里消费一条攻击，所以每方每回合 1 条是唯一的真实赛制。
   // 多预算对照留给 scripts/bench-budget.js，那里明确标注了是反事实实验。
   const MODES = [{ our: 1, ref: 1, label: '真实赛制：每方每回合 1 步' }];

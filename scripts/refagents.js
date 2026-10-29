@@ -1079,7 +1079,38 @@ SzlyBotAgent.prototype.plan = function (view) {
 
 /* ---------------- 出厂 ---------------- */
 
+/* ---------------- 外部移植：scripts/refbots/<名字>.js ----------------
+ * 目录里放一个 `module.exports = class { plan(view) {...} }` 就自动多一个同名对手，
+ * 不用改本文件——并行移植时各写各的文件，不会互相踩。
+ * 契约见 scripts/refbots/README.md。
+ */
+function loadExtra() {
+  var fs = require('fs');
+  var path = require('path');
+  var dir = path.join(__dirname, 'refbots');
+  var map = {};
+  var names = [];
+  if (!fs.existsSync(dir)) return { map: map, names: names };
+  fs.readdirSync(dir).forEach(function (f) {
+    if (!/\.js$/.test(f) || f === 'smoke.js') return;
+    var name = f.slice(0, -3);
+    try {
+      var Ctor = require(path.join(dir, f));
+      if (typeof Ctor !== 'function') throw new Error('必须导出一个构造函数');
+      map[name] = Ctor;
+      names.push(name);
+    } catch (e) {
+      console.warn('[refagents] 跳过 refbots/' + f + '：' + ((e && e.message) || e));
+    }
+  });
+  names.sort();
+  return { map: map, names: names };
+}
+
+var EXTRA = loadExtra();
+
 function makeRefAgent(name, rng) {
+  if (EXTRA.map[name]) return new EXTRA.map[name](rng);
   if (name === 'random') return new RandomAgent(rng);
   if (name === 'expander') return new ExpanderAgent(rng);
   if (name === 'hunter') return new HunterAgent(rng);
@@ -1090,4 +1121,21 @@ function makeRefAgent(name, rng) {
   throw new Error('未知 agent: ' + name);
 }
 
-module.exports = { makeRefAgent: makeRefAgent, neighborsOf: neighborsOf, bfsField: bfsField };
+/* 强对手 = LocalGen-new 血统的那批；前五个 strakam/harris 的在迷雾下几乎不动，
+ * 只留作「会动的基线」，不进 PK 合计。 */
+var STRONG = ['gc', 'szly'];
+var WEAK = ['random', 'expander', 'hunter', 'harvester', 'ladder'];
+
+function listRefAgents(kind) {
+  var strong = STRONG.concat(EXTRA.names);
+  if (kind === 'strong') return strong;
+  if (kind === 'weak') return WEAK.slice();
+  return WEAK.concat(strong);
+}
+
+module.exports = {
+  makeRefAgent: makeRefAgent,
+  listRefAgents: listRefAgents,
+  neighborsOf: neighborsOf,
+  bfsField: bfsField
+};

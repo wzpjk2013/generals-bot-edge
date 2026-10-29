@@ -28,15 +28,33 @@ const fog = process.env.GB_FOG !== '0';
 let engineCfg = null;
 if (process.env.GB_CFG) engineCfg = JSON.parse(process.env.GB_CFG);
 
-const OPPONENTS = [
-  ['random', 'strakam/generals-bots — 随机合法走子'],
-  ['expander', 'strakam/generals-bots — 边境能吃的就吃'],
-  ['hunter', 'strakam/generals-bots — 守将 + 单纵队 + 斩首'],
-  ['harvester', 'strakam/generals-bots — hunter + 顺路吃城'],
-  ['ladder', 'harrischristiansen/generals-bot — 距离折扣 + 守备需求'],
-  ['gc', 'SZXC-WG/LocalGen-new — GcBot，路线估价 + 目标黏性 + 25% 分位探索'],
-  ['szly', 'SZXC-WG/LocalGen-new — SzlyBot，块价值 + 收兵概率']
-];
+// 只跑有意义的对手。strakam / harrischristiansen 那五个在迷雾下几乎不动
+// （它们没有迷雾处理），打出来的 97% 只证明"对手更菜"，不进合计；
+// 想看它们就显式 GB_WEAK=1。
+//   LocalGen-new 血统的对手：scripts/refbots/ 下每放一个文件就自动多一行。
+const { listRefAgents } = require('./refagents.js');
+
+const NOTES = {
+  random: 'strakam/generals-bots — 随机合法走子',
+  expander: 'strakam/generals-bots — 边境能吃的就吃',
+  hunter: 'strakam/generals-bots — 守将 + 单纵队 + 斩首',
+  harvester: 'strakam/generals-bots — hunter + 顺路吃城',
+  ladder: 'harrischristiansen/generals-bot — 距离折扣 + 守备需求',
+  gc: 'LocalGen-new — GcBot，路线估价 + 目标黏性 + 25% 分位探索',
+  szly: 'LocalGen-new — SzlyBot，块价值 + 收兵概率',
+  zlyv21: 'LocalGen-new — ZlyBot v2.1，双焦点防守搜索',
+  zlyv3: 'LocalGen-new — ZlyBot v3，记忆感知加权搜索',
+  ktq: 'LocalGen-new — KtqBot，单焦点局部贪心',
+  xiaruize: 'LocalGen-new — XiaRuizeBot，多源并行路线比价',
+  kutu: 'LocalGen-new — KutuBot，统一战略目标规划',
+  oim: 'LocalGen-new — oimBot，记忆感知威胁/目标规划'
+};
+
+const picked = process.env.GB_OPP
+  ? process.env.GB_OPP.split(',').map((s) => s.trim()).filter(Boolean)
+  : listRefAgents(process.env.GB_WEAK ? 'all' : 'strong');
+const OPPONENTS = picked.map((n) => [n, NOTES[n] || '本地移植（scripts/refbots/）']);
+
 // 单独一行、不进合计：同一份代码打自己，用来检查阵营 / 先后手有没有系统性偏差
 const MIRROR = ['engine', '本引擎镜像（同代码同参数，已分胜负里应为 50%）'];
 
