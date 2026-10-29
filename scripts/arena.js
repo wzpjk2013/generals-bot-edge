@@ -509,7 +509,9 @@ if (require.main === module) {
   // GB_FOG=1 开真实迷雾（服务器按视野过滤后才下发）。默认全视野是作弊版，
   // 只用来和历史数据对比。
   const opts = { fog: process.env.GB_FOG === '1' };
-  const OPPONENTS = ['random', 'expander', 'hunter', 'harvester'];
+  // ladder = harrischristiansen/generals-bot 的移植，比 strakam 的三个基线强一个档
+  // （全视野对我们 48%，另外三个是 3~14%）；迷雾里它没有视野处理，会瞎推。
+  const OPPONENTS = ['random', 'expander', 'hunter', 'harvester', 'ladder'];
   // 服务器每个半回合只从队列里消费一条攻击，所以每方每回合 1 条是唯一的真实赛制。
   // 多预算对照留给 scripts/bench-budget.js，那里明确标注了是反事实实验。
   const MODES = [{ our: 1, ref: 1, label: '真实赛制：每方每回合 1 步' }];

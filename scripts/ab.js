@@ -17,8 +17,10 @@
 const { playGame } = require('./arena.js');
 
 const seeds = Number(process.argv[2] || 20);
-const cand = process.argv[3] ? JSON.parse(process.argv[3]) : {};
-const base = process.argv[4] ? JSON.parse(process.argv[4]) : null;
+// PowerShell 会吃掉命令行里的双引号，参数用环境变量传最稳：
+//   GB_CFG='{"garrison":false}' GB_CFG2='{"genHalf":false}'
+const cand = process.env.GB_CFG ? JSON.parse(process.env.GB_CFG) : process.argv[3] ? JSON.parse(process.argv[3]) : {};
+const base = process.env.GB_CFG2 ? JSON.parse(process.env.GB_CFG2) : process.argv[4] ? JSON.parse(process.argv[4]) : null;
 const fog = process.env.GB_FOG === '1';
 
 let games = 0;

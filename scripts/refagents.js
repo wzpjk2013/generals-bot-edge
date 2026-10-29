@@ -336,6 +336,159 @@ HarvesterAgent.prototype.plan = function (view) {
   return hunterCore(view, { cities: true });
 };
 
+/* ---------------- ladder：移植 harrischristiansen/generals-bot ---------------- */
+
+/*
+ * https://github.com/harrischristiansen/generals-bot
+ *
+ * 这个 bot 和 strakam 的三个基线不是一个量级：它有天梯实战成绩，最完整的是
+ * 「目标距离折扣」和「守备需求」。原版是 Python，这里按同一套判据重写：
+ *
+ *   目标挑选（base/client/tile.py: calculateTargetDistance / map.py）
+ *     敌将            距离 × 0.09    （显得近 11 倍）
+ *     城              距离 × clamp(0.17, 守军/(3.2×我方最大堆), 20)
+ *     空地            距离 × 4.3     （铺地最不值钱）
+ *     兵力比我厚      距离 × 1.6 × (敌兵/我兵)
+ *     打不动的目标    max_target_army = 4×最大堆 + 14 以上直接跳过
+ *
+ *   守备需求（base/bot_moves.py: garrison_needed）
+ *     needed = min(威胁 + 2, 0.5 × 总兵)
+ *     locked ⟺ 将军兵 − ⌊将军兵/2⌋ ≤ needed
+ *     一旦 generalKnownToEnemy（粘性），将军所有出子降级成 half
+ *
+ *   出兵格挑选（map.py: get_biggest_tile）
+ *     将军要参与「最厚堆」评选，得先 army×0.5 ≥ 场上最大堆（且 army ≥ 12）
+ *
+ * 迷雾上它没有特殊处理，和原版一致：FOG 格当成可通行、可吃。
+ */
+function LadderAgent(rng) {
+  this.rng = rng;
+  this.turn = 0;
+  this.genKnown = false;
+}
+
+LadderAgent.prototype.plan = function (view) {
+  var w = view.w;
+  var h = view.h;
+  var n = w * h;
+  this.turn++;
+
+  var me = view.me;
+  var i;
+  var k;
+  var gen = -1;
+  for (i = 0; i < n; i++) if (view.generals[i] && view.owner[i] === me) gen = i;
+
+  // 可见敌格 / 敌将 / 雾格
+  var enemy = new Uint8Array(n);
+  var egen = -1;
+  var biggest = 0;
+  var totalArmy = 0;
+  for (i = 0; i < n; i++) {
+    if (view.owner[i] === me) {
+      totalArmy += view.armies[i];
+      if (view.armies[i] > biggest) biggest = view.armies[i];
+    } else if (view.owner[i] >= 0) {
+      enemy[i] = 1;
+      if (view.generals[i]) egen = i;
+    }
+  }
+
+  // generalKnownToEnemy：贴着我将军的敌格 = 他看得见我
+  if (gen >= 0) {
+    for (var dir = 0; dir < 4; dir++) {
+      var gj = stepOf(view, gen, dir);
+      if (gj >= 0 && enemy[gj]) this.genKnown = true;
+    }
+  }
+
+  // 守备需求
+  var need = 0;
+  if (gen >= 0 && this.genKnown) {
+    var dg = bfsField(view, allPassable(view), (function () {
+      var s = new Uint8Array(n);
+      s[gen] = 1;
+      return s;
+    })());
+    var threat = 0;
+    for (i = 0; i < n; i++) {
+      if (!enemy[i] || dg[i] > 8) continue;
+      if (view.generals[i] || view.cities[i]) continue; // 坐家产的守备不算来袭
+      if (view.armies[i] > threat) threat = view.armies[i];
+    }
+    if (threat > 0) need = Math.min(threat + 2, totalArmy * 0.5);
+  }
+  var locked = gen >= 0 && need > 0 && view.armies[gen] - (view.armies[gen] >> 1) <= need;
+
+  // 目标距离折扣
+  var passable = allPassable(view);
+  var src = new Uint8Array(n);
+  src[gen >= 0 ? gen : 0] = 1;
+  var dist = bfsField(view, passable, src);
+  var maxTargetArmy = biggest * 4 + 14;
+  var best = -1;
+  var bestScore = INF;
+  for (i = 0; i < n; i++) {
+    if (view.owner[i] === me || !passable[i]) continue;
+    if (dist[i] >= INF) continue;
+    if (view.armies[i] > maxTargetArmy) continue;
+    var d = dist[i];
+    if (enemy[i]) {
+      d = view.generals[i] ? d * 0.09 : d * 0.5;
+      if (biggest > 0 && view.armies[i] > biggest) d *= (1.6 * view.armies[i]) / biggest;
+    } else if (view.cities[i]) {
+      var f = view.armies[i] / (3.2 * (biggest || 1));
+      if (f < 0.17) f = 0.17;
+      if (f > 20) f = 20;
+      d = d * f;
+    } else {
+      d = d * 4.3; // 空地最不值钱
+    }
+    if (d < bestScore) {
+      bestScore = d;
+      best = i;
+    }
+  }
+  if (best < 0) return null;
+
+  // 朝目标推：目标方向场 + 选最厚的可动堆
+  var tf = bfsField(view, passable, (function () {
+    var s = new Uint8Array(n);
+    s[best] = 1;
+    return s;
+  })());
+  var tw = toward(view, tf, passable);
+
+  var from = -1;
+  var fromA = 0;
+  for (i = 0; i < n; i++) {
+    if (view.owner[i] !== me || view.armies[i] <= 1) continue;
+    if (view.armies[i] < tf[i]) continue; // 走不到更近
+    if (i === gen) {
+      // 将军要够厚、且没被锁，才当主力堆
+      if (locked) continue;
+      if (this.genKnown && view.armies[i] * 0.5 < fromA) continue;
+      if (view.armies[i] * 0.5 < fromA) continue;
+    }
+    if (view.armies[i] > fromA) {
+      fromA = view.armies[i];
+      from = i;
+    }
+  }
+  if (from < 0) return null;
+  var to = stepOf(view, from, tw.dir[from]);
+  if (to < 0 || view.mountains[to]) return null;
+  if (view.armies[from] - 1 <= view.armies[to]) return null;
+  return { from: from, to: to, split: from === gen && this.genKnown };
+};
+
+function allPassable(view) {
+  var n = view.w * view.h;
+  var p = new Uint8Array(n);
+  for (var i = 0; i < n; i++) if (!view.mountains[i]) p[i] = 1;
+  return p;
+}
+
 /* ---------------- 出厂 ---------------- */
 
 function makeRefAgent(name, rng) {
@@ -343,6 +496,7 @@ function makeRefAgent(name, rng) {
   if (name === 'expander') return new ExpanderAgent(rng);
   if (name === 'hunter') return new HunterAgent(rng);
   if (name === 'harvester') return new HarvesterAgent(rng);
+  if (name === 'ladder') return new LadderAgent(rng);
   throw new Error('未知 agent: ' + name);
 }
 

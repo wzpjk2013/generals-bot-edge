@@ -29,8 +29,23 @@
   // 兵源；攒着不动才有一拳打出去的兵力，每回合挤一个兵出去只会让兵永远散在路上。
   var GENERAL_SEND_MIN = 6;
 
-  // 将军作为出兵候选时的权重：小于 1 表示排在同样厚的普通堆后面。
-  var GEN_WEIGHT = 0.6;
+  /*
+   * 将军作为出兵候选时的权重：小于 1 表示排在同样厚的普通堆后面。
+   *
+   * 0.2 的意思是「将军是最后一支被调动的部队」——只有当别的兵堆都推不动时，
+   * 主纵队的来源才轮到它。镜像 A/B（迷雾，240 局，已分胜负口径）：
+   *
+   *   genWeight 1.0   42.6%
+   *   genWeight 0.6   50.0%   （旧默认）
+   *   genWeight 0.3   58.5%
+   *   genWeight 0.2   60.3%
+   *   genWeight 0.15  60.5%
+   *   genWeight 0.0   12.5%   （将军彻底不出兵 → 崩盘）
+   *
+   * 曲线的两头都说明问题：0 会崩，因为前期只有将军有兵、它是唯一的推力来源；
+   * 但把它当普通兵源用（1.0）也会输，因为它一出门就是「把胜负手往前线挪」。
+   */
+  var GEN_WEIGHT = 0.2;
 
   /*
    * 将军的三个阶段（S.turn 是服务器 tick，显示回合 = tick/2）：
@@ -146,6 +161,7 @@
       S._focusStuck = 0;
       S._focusDir = null;
       S._preferCity = false;
+      S._genKnown = false;
     }
     S._focusTurn = S.turn;
 
@@ -184,7 +200,10 @@
     var pLate = C.phaseLate === undefined ? PHASE_LATE : C.phaseLate | 0;
     var gSafe = C.genSafe === undefined ? GEN_SAFE : C.genSafe | 0;
     var killR = C.killRatio === undefined ? KILL_RATIO : Number(C.killRatio);
-    var lateFreeze = C.lateFreeze !== false;
+    // 将军后期封存：默认关闭。镜像 A/B 里「不封存」在迷雾 67.2% : 32.8%、
+    // 全视野 54.4% : 45.6% 都赢——封存是打弱参考 bot 时得出的假结论，那时候
+    // 对面根本惩罚不了将军不出门。留着开关给以后的高延迟场景用。
+    var lateFreeze = C.lateFreeze === true;
     var doPurge = C.purge !== false;
     // 掠食实测是负收益（88.4% vs 89.1%），默认关闭，留着开关给以后的图用。
     var doHarvest = C.harvest === true;
@@ -196,16 +215,58 @@
     var phase = tick < pEarly ? 0 : tick < pLate ? 1 : 2;
     if (phase === 2 && !lateFreeze) phase = 1;
 
+    var doMem = C.mem !== false;
+    var memTtl = C.memTtl === undefined ? 40 : C.memTtl | 0;
+
+    /*
+     * 迷雾记忆。
+     *
+     * 服务器每回合都按当前视野重新序列化地图（Map.serialized），看不见的格子直接
+     * 变成 TILE_FOG、兵数抹成 0——客户端自己是一点记忆都没有的。人打游戏不是这样：
+     * 你三回合前看见对面 30 个兵往东压，这回合它进了黑区，你仍然知道它往东去了。
+     *
+     * 这里把那点记忆补回来：每回合把当前看得见的格子记下来（归属 / 兵数 / 时间），
+     * 后面用「最近 memTtl 个 tick 内见过的敌格」补进威胁场和目标选择。
+     */
+    var M = S._mem;
+    if (!doMem) {
+      M = null;
+    } else {
+      if (!M || M.n !== n) {
+        M = S._mem = {
+          n: n,
+          owner: new Int16Array(n),
+          armies: new Int32Array(n),
+          turn: new Int32Array(n).fill(-1000000)
+        };
+      }
+      for (var m = 0; m < n; m++) {
+        var mt = S.terrain[m];
+        if (mt === T.FOG || mt === T.FOG_OBSTACLE) continue;
+        M.owner[m] = mt;
+        M.armies[m] = S.armies[m];
+        M.turn[m] = tick;
+      }
+    }
+
     /*
      * 每格到最近敌方领土的步数（穿过任何可通行格）。将军靠它判断「这一步会不会
-     * 进对面视野」——迷雾是渲染层的东西，数据层我们看得见全部敌格。
+     * 进对面视野」。注意这里只有**看得见**的敌格：迷雾是服务器在数据层过滤的，
+     * 看不见的敌格根本不下发（generals 里是 -1，map 里是 TILE_FOG）。记忆能补
+     * 一点（见上），但补不到「已经进了黑区的部队现在在哪」。
      */
     function enemyDistField() {
       var d = new Int32Array(n).fill(-1);
       var q = [];
       var i;
       for (i = 0; i < n; i++) {
-        if (owner[i] >= 0 && owner[i] !== pid) {
+        var eo = owner[i];
+        // 看不见的格子用记忆补：最近 memTtl 个 tick 内见过它是敌格，就还算威胁源。
+        // 不补的话，敌人在雾里走三步，我们的威胁场就当他消失了。
+        if (eo === T.FOG || eo === T.FOG_OBSTACLE) {
+          eo = M && tick - M.turn[i] <= memTtl ? M.owner[i] : -1;
+        }
+        if (eo >= 0 && eo !== pid) {
           d[i] = 0;
           q.push(i);
         }
@@ -223,6 +284,102 @@
       return d;
     }
     var denemy = enemyDistField();
+
+    /*
+     * 守备需求（garrison need）。
+     *
+     * 「将军留几个兵」不该是个常数。harrischristiansen/generals-bot 的算法是：
+     *
+     *     needed = min(威胁 + 2, 0.5 × 总兵力)
+     *
+     * 威胁 = 将军 8 步以内最厚的敌方部队（敌将和城里的守备不算——那是坐家产的
+     * 兵，不是冲过来的兵）。没被发现、没人来的时候 needed = 0，将军随便动；
+     * 一旦有人在 8 步内压过来，留底就跟着涨。封顶 0.5 是防止全副家当缩在将军
+     * 脚下——那样前线就断了。
+     *
+     * 出门门槛取 max(8, 2 × needed)：8 来自 strakam/hunter（GARRISON=4，送到
+     * 2×GARRISON 才开始送，而且只送一半）。
+     */
+    var totalArmy = 0;
+    var ti;
+    for (ti = 0; ti < n; ti++) if (owner[ti] === pid) totalArmy += armies[ti];
+
+    function garrisonNeed() {
+      if (myGeneral < 0 || owner[myGeneral] !== pid) return 0;
+      var dg = new Int16Array(n).fill(-1);
+      var qq = [myGeneral];
+      dg[myGeneral] = 0;
+      var threat = 0;
+      for (var h = 0; h < qq.length; h++) {
+        var cur = qq[h];
+        if (dg[cur] >= 8) continue;
+        var list = nbr[cur];
+        for (var k = 0; k < list.length; k++) {
+          var j = list[k];
+          if (dg[j] !== -1) continue;
+          if (!isPassable(owner, j)) continue;
+          dg[j] = dg[cur] + 1;
+          qq.push(j);
+          if (owner[j] >= 0 && owner[j] !== pid) {
+            // 敌将本身、城里的守军都是坐家产的兵，不进来袭威胁
+            if (j === generals[owner[j]] || isCity[j]) continue;
+            if (armies[j] > threat) threat = armies[j];
+          } else {
+            var nbq = nbr[j];
+            for (var k2 = 0; k2 < nbq.length; k2++) {
+              var e2 = nbq[k2];
+              if (owner[e2] < 0 || owner[e2] === pid) continue;
+              if (e2 === generals[owner[e2]] || isCity[e2]) continue;
+              if (armies[e2] > threat) threat = armies[e2];
+            }
+          }
+        }
+      }
+      if (threat <= 0) return 0;
+      var need = threat + 2;
+      var cap = totalArmy * 0.5;
+      return need > cap ? cap : need;
+    }
+    /*
+     * 守备需求公式默认关闭。
+     *
+     * 这个公式本身是对的（harrischristiansen 的 min(威胁+2, 0.5×总兵)），搬进来
+     * 之后确实按设计工作了：只要 8 步内有来敌，将军的出门门槛就抬高。问题是它
+     * 抬高的是「将军不出门」——而在这条规则下（半回合 1 步、将军 +1/回合是开局
+     * 唯一的稳定兵源）将军不出门等于主推力消失。
+     *
+     * 实测（全视野 320 局）：开着 84.5%、关着 89.0%；对 hunter 78.8% : 88.8%。
+     * 所以保留代码、默认关闭，作为以后换地图/换节奏时的开关。
+     */
+    var useGarrison = C.garrison === true;
+    var genHalf = C.genHalf !== false;
+    var need0 = useGarrison ? garrisonNeed() : 0;
+
+    // 将军是否已经被对方看见（粘性）。任一敌格贴着将军，就等于他已经看见了。
+    // 一旦暴露，harrischristiansen 会把所有从将军出来的移动降级成「只送一半」。
+    if (myGeneral >= 0 && owner[myGeneral] === pid && !S._genKnown) {
+      var gadj2 = nbr[myGeneral];
+      for (var gi2 = 0; gi2 < gadj2.length; gi2++) {
+        var gj2 = gadj2[gi2];
+        if (owner[gj2] >= 0 && owner[gj2] !== pid) {
+          S._genKnown = true;
+          break;
+        }
+      }
+    }
+
+    /*
+     * 将军出门门槛 = max(8, 2 × 守备需求)，被对面看见了再 ×1.5。
+     *
+     * 原来的常数 6 是手调的，没有任何出处。换成两条能查到的：
+     *   - 8 = 2 × GARRISON(4)，strakam/hunter_agent 的出门阈值
+     *   - 2 × 守备需求：将军送出一半之后，留下的 ceil(a/2) 要盖得住 8 步内的来敌
+     *     （harrischristiansen 的 garrison_needed）
+     * 被看见之后门槛再抬，因为对面能数着你的兵算什么时候来。
+     */
+    var genSend = genSendMin;
+    if (2 * need0 > genSend) genSend = 2 * need0;
+    if (useGarrison && S._genKnown) genSend = Math.ceil(genSend * 1.5);
 
     function safeForGeneral(idx) {
       if (denemy[idx] < 0) return true; // 视野里根本没有敌格
@@ -253,7 +410,9 @@
       // 将军出兵要留底：一次送光，下一回合被贴脸就没得守了。
       // 早期例外——这时候只有将军有余粮，留着不推等于整局不动。
       var sent = a - 1;
-      if (genOut) sent = a - Math.min(GARRISON, a >> 1);
+      // 将军出兵只送一半（strakam/hunter 的 split=1）。出门 4 留 4：兵源和推力
+      // 同时存在。全送等于把家底一次搬到前线，下一回合被贴脸就什么都没了。
+      if (genOut) sent = genHalf ? a >> 1 : a - Math.min(GARRISON, a >> 1);
       if (sent < 1) return false;
       // 往自己的格子并兵永远合法（只损耗 1），往敌人格必须打得过
       if (!own && sent <= armies[to]) return false;
@@ -721,6 +880,36 @@
          *   2. 最近的未知格。扩张应该朝「边界外的黑」推，不是朝「地图最远
          *      端」推——后者会绕开身边一大片没探过的地。
          */
+        /*
+         * 0. 记忆里最近见过的敌格。对面看见我们就会动，可我们只要没丢视野就
+         *    能一直跟到它进黑区；这时候往「它最后一次出现的地方」推，比随便找
+         *    一块黑地推更容易接上火——黑区那么多，接火点只有一个。
+         *    分数用 dist + 龄期：远处的旧线索让位给近处的新线索。
+         */
+        var memBest = -1;
+        var memScore = Infinity;
+        if (M) {
+          for (i = 0; i < n; i++) {
+            if (owner[i] !== T.FOG && owner[i] !== T.FOG_OBSTACLE) continue;
+            var age = tick - M.turn[i];
+            if (age > memTtl * 3) continue;
+            var mo = M.owner[i];
+            if (!(mo >= 0 && mo !== pid)) continue;
+            if (dist[i] < 0) continue;
+            var sc = dist[i] + age / 4;
+            if (sc < memScore) {
+              memScore = sc;
+              memBest = i;
+            }
+          }
+        }
+        if (memBest >= 0) {
+          S._focus = memBest;
+          S._focusStuck = 0;
+          S._focusDir = null;
+          return memBest;
+        }
+
         var maxOur = 0;
         for (i = 0; i < n; i++) {
           if (owner[i] === pid && armies[i] > maxOur) maxOur = armies[i];
@@ -815,7 +1004,7 @@
            * 填兵，一步也没推出去（trace 里 125>105>104 反复 25 回合）。
            * 攒到 6 再送，一次送 3 个，链才有厚度往前推。
            */
-          if (armies[i] < genSendMin) continue;
+          if (armies[i] < genSend) continue;
           // 已经在敌方视野圈边上：确认朝目标方向还有一步是安全的，否则原地攒兵。
           if (!safeForGeneral(i)) {
             var canStep = false;
