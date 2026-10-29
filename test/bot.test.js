@@ -1,0 +1,196 @@
+/*
+ * 决策引擎离线回归：不依赖浏览器，直接喂合成地图。
+ * 运行：node test/bot.test.js
+ */
+'use strict';
+
+global.window = global;
+require('../src/state.js');
+require('../src/bot.js');
+
+const assert = require('node:assert/strict');
+const GB = global.window.__GB;
+const T = GB.TILE;
+
+/** tiles: { index: { owner: 0|1..., army: n, city: bool } } */
+function makeMap(w, h, tiles) {
+  const n = w * h;
+  const armies = new Array(n).fill(0);
+  const terrain = new Array(n).fill(T.EMPTY);
+  for (const key of Object.keys(tiles)) {
+    const i = Number(key);
+    const spec = tiles[key];
+    if (spec.owner !== undefined) terrain[i] = spec.owner;
+    if (spec.army !== undefined) armies[i] = spec.army;
+  }
+  return [w, h, ...armies, ...terrain];
+}
+
+function makeState(w, h, tiles, opts = {}) {
+  const S = new GB.GameState();
+  const cities = [];
+  for (const key of Object.keys(tiles)) {
+    if (tiles[key].city) cities.push(Number(key));
+  }
+  S.applyStart({
+    playerIndex: opts.playerIndex ?? 0,
+    generals: opts.generals ?? [-1],
+    cities,
+    map: makeMap(w, h, tiles),
+    game_type: 'custom'
+  });
+  S.turn = 10;
+  return S;
+}
+
+function delta(oldArr, newArr) {
+  if (!oldArr || oldArr.length !== newArr.length) return [0, newArr.length].concat(newArr);
+  const out = [];
+  let same = 0;
+  let i = 0;
+  while (i < newArr.length) {
+    if (oldArr[i] === newArr[i]) {
+      same++;
+      i++;
+      continue;
+    }
+    let changed = 0;
+    const vals = [];
+    while (i < newArr.length && oldArr[i] !== newArr[i]) {
+      changed++;
+      vals.push(newArr[i]);
+      i++;
+    }
+    out.push(same, changed, ...vals);
+    same = 0;
+  }
+  out.push(same);
+  return out;
+}
+
+let passed = 0;
+function test(name, fn) {
+  fn();
+  passed++;
+  console.log('  ok  ' + name);
+}
+
+console.log('state:');
+
+test('串行化地图解析', () => {
+  const S = makeState(3, 1, { 0: { owner: 0, army: 7 } }, { generals: [0] });
+  assert.equal(S.w, 3);
+  assert.equal(S.h, 1);
+  assert.equal(S.n, 3);
+  assert.equal(S.armies[0], 7);
+  assert.equal(S.terrain[0], 0);
+  assert.equal(S.terrain[1], T.EMPTY);
+  assert.equal(S.ready, true);
+});
+
+test('地图增量还原与官方 delta 编码一致', () => {
+  const S = makeState(4, 1, { 0: { owner: 0, army: 7 } });
+  const before = S.raw.slice();
+  const after = before.slice();
+  after[2] = 3; // armies[0]
+  after[2 + 4 + 1] = 0; // terrain[1] 归我方
+  S.applyUpdate({ map_diff: delta(before, after), turn: 11 });
+  assert.deepEqual(Array.from(S.raw), after);
+  assert.equal(S.armies[0], 3);
+  assert.equal(S.terrain[1], 0);
+});
+
+test('cities_diff 还原', () => {
+  const S = makeState(4, 1, { 2: { city: true } });
+  assert.deepEqual(S.cities, [2]);
+  S.applyUpdate({ cities_diff: delta(S.rawCities, [2, 3]), turn: 12 });
+  assert.deepEqual(S.cities, [2, 3]);
+});
+
+console.log('bot:');
+
+test('空地扩张', () => {
+  const S = makeState(3, 1, { 0: { owner: 0, army: 5 } }, { generals: [0] });
+  const moves = GB.bot.plan(S, { maxMoves: 6 });
+  assert.deepEqual(moves, [[0, 1]]);
+});
+
+test('优先吃城市', () => {
+  // 1 是我方(10)，0 空地，2 城市(守军 3)：应当打城市
+  const S = makeState(3, 1, { 1: { owner: 0, army: 10 }, 2: { city: true, army: 3 } });
+  const moves = GB.bot.plan(S, { maxMoves: 6 });
+  assert.equal(moves.length, 1);
+  assert.deepEqual(moves[0], [1, 2]);
+});
+
+test('打不过就不打', () => {
+  const S = makeState(2, 1, { 0: { owner: 0, army: 3 }, 1: { city: true, army: 40 } });
+  const moves = GB.bot.plan(S, { maxMoves: 6 });
+  assert.ok(moves.every((m) => m[1] !== 1), '不应硬碰 40 守军');
+});
+
+test('敌方将军贴脸直接斩首', () => {
+  const S = makeState(2, 1, {
+    0: { owner: 0, army: 10 },
+    1: { owner: 1, army: 4 }
+  }, { generals: [0, 1] });
+  const moves = GB.bot.plan(S, { maxMoves: 6 });
+  assert.deepEqual(moves[0], [0, 1]);
+});
+
+test('将军被围时先反打', () => {
+  // 我方将军在 0(2)，敌人 1(5) 贴脸，邻居无兵 -> 守不住也走不了
+  const S = makeState(2, 1, {
+    0: { owner: 0, army: 2 },
+    1: { owner: 1, army: 5 }
+  }, { generals: [0, 1] });
+  const moves = GB.bot.plan(S, { maxMoves: 6 });
+  assert.equal(moves.length, 0);
+});
+
+test('将军被围时邻居代打', () => {
+  // 将军 1(1)，敌人 0(5) 贴脸，邻居 2(30) 可以吃掉
+  const S = makeState(3, 1, {
+    0: { owner: 1, army: 5 },
+    1: { owner: 0, army: 1 },
+    2: { owner: 0, army: 30 }
+  }, { generals: [1, 0] });
+  const moves = GB.bot.plan(S, { maxMoves: 6 });
+  assert.ok(moves.some((m) => m[1] === 0), '应吃掉贴脸的敌人: ' + JSON.stringify(moves));
+});
+
+test('无扩张空间时向前线合兵', () => {
+  // 0..5 我方，6 是敌人重兵：腹地 0 的 10 兵应当往前推
+  const tiles = {
+    0: { owner: 0, army: 10 },
+    1: { owner: 0, army: 1 },
+    2: { owner: 0, army: 1 },
+    3: { owner: 0, army: 1 },
+    4: { owner: 0, army: 1 },
+    5: { owner: 0, army: 1 },
+    6: { owner: 1, army: 100 }
+  };
+  const S = makeState(7, 1, tiles, { generals: [0] });
+  const moves = GB.bot.plan(S, { maxMoves: 6 });
+  assert.ok(moves.some((m) => m[0] === 0), '应推动 0 号格兵力: ' + JSON.stringify(moves));
+});
+
+test('预算上限生效', () => {
+  // 十字形中心 100 兵，四周都是空地
+  const w = 5;
+  const h = 5;
+  const tiles = { 12: { owner: 0, army: 100 } };
+  for (const i of [7, 11, 13, 17]) tiles[i] = { owner: 0, army: 100 };
+  const S = makeState(w, h, tiles);
+  const moves = GB.bot.plan(S, { maxMoves: 2 });
+  assert.ok(moves.length <= 2, '步数应 <= 2, 实际 ' + moves.length);
+});
+
+test('同一格一回合只动一次', () => {
+  const S = makeState(5, 1, { 0: { owner: 0, army: 100 } });
+  const moves = GB.bot.plan(S, { maxMoves: 6 });
+  const froms = moves.map((m) => m[0]);
+  assert.equal(new Set(froms).size, froms.length, '重复出兵: ' + JSON.stringify(moves));
+});
+
+console.log('\n' + passed + ' passed');

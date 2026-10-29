@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Generals AutoPilot",
+  "version": "1.0.0",
+  "description": "generals.io 自动决策与自动移动：解析对局状态、跑决策引擎、通过原 socket 下发 attack。",
+  "minimum_chrome_version": "111",
+  "permissions": ["storage"],
+  "host_permissions": ["https://generals.io/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://generals.io/*"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "js": ["src/state.js", "src/bot.js", "src/hook.js"]
+    },
+    {
+      "matches": ["https://generals.io/*"],
+      "run_at": "document_start",
+      "js": ["src/bridge.js"]
+    }
+  ]
+}
