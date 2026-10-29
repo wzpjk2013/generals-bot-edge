@@ -143,10 +143,20 @@ test('空地扩张（沿路径推进）', () => {
   validate(S, moves);
 });
 
-test('将军没攒够就不出门', () => {
-  const S = makeState(3, 1, { 0: { owner: 0, army: 5 } }, { generals: [0] });
+test('将军没攒够就不出门（中期门槛 6）', () => {
+  // 中期（turn >= PHASE_EARLY=50）将军要攒到 genSendMin(6) 才出门
+  const S = makeState(3, 1, { 0: { owner: 0, army: 5 } }, { generals: [0], turn: 60 });
   const moves = GB.bot.plan(S, { maxMoves: 6 });
   assert.equal(moves.length, 0);
+});
+
+test('早期将军门槛只有 3：不空等', () => {
+  // 开局前 50 tick 除了将军没有兵源，凑 6 兵要 10 个 tick，那 10 手全是空过。
+  // genSendEarly=3 让它在 3 兵就出门，一次送 2 个（不是一滴一滴挤）。
+  const S = makeState(3, 1, { 0: { owner: 0, army: 3 } }, { generals: [0], turn: 4 });
+  const moves = GB.bot.plan(S, { maxMoves: 6 });
+  assert.ok(moves.length >= 1, '早期 3 兵就该出门');
+  assert.equal(moves[0][0], 0);
 });
 
 test('优先吃城市', () => {

@@ -282,6 +282,8 @@
      * 等于每回合往同一格灌 1 个兵，后面那堆厚的永远不动，纵队彻底断供。
      */
     var railFront = C.railFront === true;
+    // 别往后倒兵（见 supply 里的白搬闸门）
+    var noBackstep = C.noBackstep !== false;
     var cityGate = C.cityGate !== false;
     var cityMaxDist = C.cityMaxDist === undefined ? 12 : C.cityMaxDist | 0;
     // 近在眼前的城优先买（8 步内），远城不追——隧道比城本身还贵
@@ -476,6 +478,19 @@
     var genSend = genSendMin;
     if (2 * need0 > genSend) genSend = 2 * need0;
     if (useGarrison && S._genKnown) genSend = Math.ceil(genSend * 1.5);
+    /*
+     * 早期将军的出门门槛单独一档，默认 3。
+     *
+     * 开局前 50 tick 里除了将军没有任何兵源，凑到 6 兵要 10 个 tick——这 10 手
+     * 全是空过（回放 N7Npym_VP 的真实对局：t=0..9 一手没下，t=15..19 又空五手，
+     * 全盘 26 手空过里有 20 手在开局）。空过的机会成本是永远的：那 10 个 tick
+     * 本来能铺 10 格地，每格每 50 tick +1 兵。
+     *
+     * 门槛压到 3 也是「一次送 2 个兵」，不是一滴一滴挤：1 兵格不能动，兵会永远
+     * 卡在路上（GEN_WEIGHT 上面的注释记的是同一条）。
+     */
+    var genSendEarly = C.genSendEarly === undefined ? 3 : C.genSendEarly | 0;
+    if (phase === 0 && genSendEarly < genSend) genSend = Math.max(2, genSendEarly);
 
     function safeForGeneral(idx) {
       if (denemy[idx] < 0) return true; // 视野里根本没有敌格
@@ -1379,6 +1394,25 @@
         if (armies[gidx] < 3) continue; // 内部搬运门槛，见 move()
         var gstep = railStep.get(gidx);
         if (gstep === undefined) continue;
+        /*
+         * 别往后倒兵（noBackstep）。
+         *
+         * 条件很窄，只在三种情况同时成立时才跳过一个候选：
+         *   能看见敌格（denemy >= 0）——迷雾里两边都是 -1 时这条不起作用；
+         *   这一步让离敌格更远；
+         *   目标格只是个薄格（< 4 兵），不是去跟厚堆会合。
+         * 回放 N7Npym_VP 的 t=76/84/86/94/96 就是这一种：(16,5) 攒到 18~23 兵，
+         * 一次一次往 (16,6) 倒，离敌从 11 步变成 12 步，每倒一次还留 1 兵在原地。
+         * 全盘这类手 66 手（11.1%），是「没意思的 turn」里最大的一块。
+         */
+        if (
+          noBackstep &&
+          denemy[gidx] >= 0 &&
+          denemy[gstep] >= 0 &&
+          denemy[gstep] > denemy[gidx] &&
+          armies[gstep] < 4
+        )
+          continue;
         if (move(gidx, gstep, 'gather')) return true;
       }
       return false;

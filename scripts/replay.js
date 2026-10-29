@@ -12,6 +12,8 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { decompressFromUint8Array } = require('./gior.js');
 
 const EMPTY = -1;
@@ -19,6 +21,23 @@ const MOUNTAIN = -2;
 const TILE = ['空地', '空地', '山'];
 
 async function fetchReplay(id) {
+  /*
+   * 先看本地缓存。
+   *
+   * generals.io 的回放接口会限流（同一 IP 连着拉几次就 403），而审计一局要
+   * 反复跑 replay / regret / turns 三条命令。落盘一份 .gior 就能离线复跑，
+   * 也保证「同一个回放号」以后每次分析的都是同一份数据。
+   */
+  const cacheDir = path.join(os.tmpdir(), 'gb-replay-cache');
+  const cacheFile = path.join(cacheDir, id.replace(/[^\w.-]/g, '_') + '.gior');
+  try {
+    if (fs.existsSync(cacheFile)) {
+      const buf = new Uint8Array(fs.readFileSync(cacheFile));
+      if (buf.length >= 16) return { buf, url: 'cache:' + cacheFile };
+    }
+  } catch (e) {
+    /* 缓存坏了就当没有 */
+  }
   const urls = [
     'https://generals.io/api/replay/' + encodeURIComponent(id),
     'https://generalsio-replays-na.s3.amazonaws.com/' + encodeURIComponent(id) + '.gior'
@@ -29,12 +48,18 @@ async function fetchReplay(id) {
       if (!res.ok) continue;
       const buf = new Uint8Array(await res.arrayBuffer());
       if (buf.length < 16) continue;
+      try {
+        fs.mkdirSync(cacheDir, { recursive: true });
+        fs.writeFileSync(cacheFile, buf);
+      } catch (e) {
+        /* 缓存写不进去不影响本次分析 */
+      }
       return { buf, url };
     } catch (e) {
       /* 试下一个 */
     }
   }
-  throw new Error('拿不到回放 ' + id + '（两个源都失败）');
+  throw new Error('拿不到回放 ' + id + '（两个源都失败；本地缓存 ' + cacheFile + ' 也没有）');
 }
 
 /* 字段顺序照官方 a.deserialize */
