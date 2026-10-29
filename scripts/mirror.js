@@ -7,14 +7,15 @@
  * 参考 bot 在迷雾里太弱，打它们看不出引擎的进步。
  *
  * 运行：node scripts/mirror.js [种子数]
- *       GB_FOG=1 node scripts/mirror.js 40
+ *       node scripts/mirror.js 40
  */
 'use strict';
 
 const { playGame } = require('./arena.js');
 
 const seeds = Number(process.argv[2] || 40);
-const fog = process.env.GB_FOG === '1';
+// 默认真实迷雾；GB_FOG=0 才是作弊的全视野
+const fog = process.env.GB_FOG !== '0';
 let cfg = null;
 if (process.env.GB_CFG) cfg = JSON.parse(process.env.GB_CFG);
 

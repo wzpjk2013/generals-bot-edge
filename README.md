@@ -108,6 +108,8 @@ scripts/refagents.js    参考 bot 移植（random / expander / hunter / harvest
 scripts/arena.js        与参考 bot 的 1v1 擂台（GB_FOG=1 切真实迷雾）
 scripts/ab.js           镜像 A/B：同一份代码、不同参数对打，50% 就是没差别
 scripts/mirror.js       引擎打自己，查走子顺序 / 阵营有没有系统性偏差
+scripts/pk-report.js    全对手 PK 报告（Markdown 表格，GB_WRITE=1 写 PK.md）
+PK.md                   最近一次 PK 结果（脚本生成，别手改）
 scripts/idle-stats.js   空转率统计（整回合一条命令都没出的比例）
 scripts/trace-fog.js    单局迷雾 trace（逐回合打印走子）
 ```
@@ -122,9 +124,10 @@ node scripts/bench.js        # 单回合决策耗时 + 200 回合扩张率（每
 node scripts/bench-ab.js     # 推土机 vs 最大流：打穿硬骨头的回合数
 node scripts/bench-budget.js # 反事实实验：每回合给 N 条命令会怎样（非真实赛制）
 node scripts/bench-net.js    # AverageJoe 单次前向延迟（L / S 两档）
-node scripts/arena.js 40     # 与参考 bot 的 400 局 PK（5 个对手 × 40 种子 × 先后手）
-GB_FOG=1 node scripts/arena.js 40        # 同上，换成服务器真实视野
-GB_FOG=1 GB_CFG='{"genWeight":0.2}' node scripts/ab.js 100   # 镜像 A/B（PowerShell 里用环境变量传 cfg）
+node scripts/pk-report.js 40 # 全对手 PK 表（默认迷雾），GB_WRITE=1 写 PK.md
+node scripts/arena.js 40     # 只跑擂台、逐行打印（5 个对手 × 40 种子 × 先后手）
+node scripts/ab.js 100       # 镜像 A/B（GB_CFG / GB_CFG2 传参数，PowerShell 里用环境变量最稳）
+GB_FOG=0 node scripts/arena.js 40        # ⚠️ 全视野作弊版，只用于和旧数据对比
 node scripts/idle-stats.js hunter 40   # 空转率：整回合一条命令都没出的比例
 node scripts/e2e-check.js    # 需要本机 Edge，自动起 headless
 node scripts/e2e-pipeline.js # 未打包加载 + 合成对局，断言 attack 参数形状
@@ -239,9 +242,9 @@ for (A = 0; A < cities.length; A++) {
 每回合都重新按当前视野序列化，所以看不见的格子会被改回 `TILE_FOG`、兵数抹成 0。
 客户端（和扩展读到的 `map`）能知道的，只有这一回合看得见的东西。
 
-`scripts/arena.js` 的默认全视野是**作弊版**；`GB_FOG=1` 才是服务器给你的真实信息。
-迷雾模型按上面三条实现：3×3 视野、看不见的城退化成障碍、无记忆。引擎侧另外自己维护
-了一份「最近见过的敌格」（`S._mem`）——那是人脑，不是客户端。
+**所有跑分默认就是迷雾**，全视野是作弊版，只有显式写 `GB_FOG=0` 才给。迷雾模型按上面
+三条实现：3×3 视野、看不见的城退化成障碍、无记忆。引擎侧另外自己维护了一份「最近见过
+的敌格」（`S._mem`）——那是人脑，不是客户端。
 
 ## PK：和参考 bot 打
 
@@ -269,34 +272,23 @@ for (A = 0; A < cities.length; A++) {
 之前按「我方先走」排，等于每一局都在让先——后手能看着你先走那一步回应。实测先手方
 在已分胜负的局里只赢 42.6%，这是一笔白送出去的 7 个点。
 
-两种视野各跑一遍。**默认是全视野，那是作弊版**；`GB_FOG=1` 才是服务器给你的真实信息。
+**所有跑分默认都是迷雾**，全视野是作弊版，只有显式写 `GB_FOG=0` 才给。
 
-```
-$ node scripts/arena.js 40
-  对手          局数   胜   负   和    胜率   平均回合
-  random         80   80    0    0  100.0%      65
-  expander       80   77    1    2   96.3%     102
-  hunter         80   71    9    0   88.8%      94
-  harvester      80   71    9    0   88.8%      94
-  ladder         80   57   16    7   71.3%     234
+完整结果在 [`PK.md`](PK.md)（`node scripts/pk-report.js 40` 生成，400 局）：
 
-总计 400 局：胜 356 / 负 35 / 和 9，胜率 89.0%
+| 对手 | 局数 | 胜 | 负 | 和 | 胜率 | 分出率 | 平均回合 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `random` | 80 | 79 | 0 | 1 | 98.8% | 98.8% | 220 |
+| `expander` | 80 | 77 | 1 | 2 | 96.3% | 97.5% | 266 |
+| `hunter` | 80 | 77 | 0 | 3 | 96.3% | 96.3% | 294 |
+| `harvester` | 80 | 77 | 0 | 3 | 96.3% | 96.3% | 290 |
+| `ladder` | 80 | 80 | 0 | 0 | 100.0% | 100.0% | 262 |
+| **合计** | **400** | **390** | **1** | **9** | **97.5%** | **97.8%** | |
 
-$ GB_FOG=1 node scripts/arena.js 40
-  对手          局数   胜   负   和    胜率   平均回合
-  random         80   79    0    1   98.8%     220
-  expander       80   77    1    2   96.3%     266
-  hunter         80   77    0    3   96.3%     294
-  harvester      80   77    0    3   96.3%     290
-  ladder         80   80    0    0  100.0%     262
-
-总计 400 局：胜 390 / 负 1 / 和 9，胜率 97.5%
-```
-
-**迷雾比全视野更好赢，因为对手不会玩迷雾。** 除了我们自己的引擎，这五个移植里没有
-一个在迷雾下做任何事：它们把 FOG 当空地，把看不到的城市当墙，也从不找人。`ladder`
-在全视野能赢我们 28.7%，一进迷雾就 0:80。所以迷雾那一栏只说明「我们的迷雾处理比它们
-强」，不说明我们迷雾打得好——真正的对照是下面这个镜像 A/B。
+**这个 97.5% 不能当成「迷雾打得好」。** 除了我们自己的引擎，这五个移植里没有一个在
+迷雾下做任何事：它们把 FOG 当空地，把看不到的城市当墙，也从不找人。`ladder` 在全视野
+下能赢我们 28.7%，一进迷雾就 0:80。所以这张表只说明「我们的迷雾处理比它们强」——
+真正的对照是下面这个镜像 A/B。
 
 ### 镜像 A/B：唯一能证明「变强了」的对照
 
@@ -304,12 +296,8 @@ $ GB_FOG=1 node scripts/arena.js 40
 两边参数不同，对打**。胜率 50% 就是没差别；先手劣势靠「每组种子跑两遍、交换先手」抵消。
 
 ```
-$ GB_FOG=1 node scripts/ab.js 100          # 候选 = 默认，基线 = 上一版默认
-  {"lateFreeze":true,"genWeight":0.6}
+$ node scripts/ab.js 100     # 候选 = 现默认，基线 = 上一版默认 {"lateFreeze":true,"genWeight":0.6}
   胜 121 / 负 53 / 和 26   已分胜负里 69.5%     # 迷雾 200 局
-
-$ node scripts/ab.js 100
-  胜 103 / 负 70 / 和 27   已分胜负里 59.5%     # 全视野 200 局
 ```
 
 ## 将军何时出门

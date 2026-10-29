@@ -8,8 +8,8 @@
  * 你这一步回应）。所以每组种子跑两遍、交换先后手，把这个偏差抵消掉。
  *
  * 运行：
- *   GB_FOG=1 node scripts/ab.js 40 '{"genFogGuard":2}'
- *   GB_FOG=1 node scripts/ab.js 40 '{"genFogGuard":2}' '{"genFogGuard":0}'
+ *   node scripts/ab.js 40 '{"genFogGuard":2}'
+ *   node scripts/ab.js 40 '{"genFogGuard":2}' '{"genFogGuard":0}'
  * 第一个参数是「候选」参数，第二个是「基线」参数（省略 = 默认引擎）。
  */
 'use strict';
@@ -21,7 +21,8 @@ const seeds = Number(process.argv[2] || 20);
 //   GB_CFG='{"garrison":false}' GB_CFG2='{"genHalf":false}'
 const cand = process.env.GB_CFG ? JSON.parse(process.env.GB_CFG) : process.argv[3] ? JSON.parse(process.argv[3]) : {};
 const base = process.env.GB_CFG2 ? JSON.parse(process.env.GB_CFG2) : process.argv[4] ? JSON.parse(process.argv[4]) : null;
-const fog = process.env.GB_FOG === '1';
+// 默认真实迷雾；GB_FOG=0 才是作弊的全视野
+const fog = process.env.GB_FOG !== '0';
 
 let games = 0;
 let wins = 0;

@@ -495,7 +495,7 @@ function header() {
   );
 }
 
-module.exports = { playGame: playGame, makeMap: makeMap };
+module.exports = { playGame: playGame, makeMap: makeMap, runCell: runCell };
 
 if (require.main === module) {
   const seeds = Number(process.argv[2] || 40);
@@ -506,11 +506,11 @@ if (require.main === module) {
     if (a.startsWith('--cfg=')) engineCfg = JSON.parse(a.slice(6));
   }
   if (process.env.GB_CFG) engineCfg = JSON.parse(process.env.GB_CFG);
-  // GB_FOG=1 开真实迷雾（服务器按视野过滤后才下发）。默认全视野是作弊版，
-  // 只用来和历史数据对比。
-  const opts = { fog: process.env.GB_FOG === '1' };
-  // ladder = harrischristiansen/generals-bot 的移植，比 strakam 的三个基线强一个档
-  // （全视野对我们 48%，另外三个是 3~14%）；迷雾里它没有视野处理，会瞎推。
+  // 默认就是真实迷雾（服务器在数据层按视野过滤）。全视野是作弊版，只有显式
+  // 写 GB_FOG=0 才给——它唯一还能用的地方是和旧数据对比。
+  const opts = { fog: process.env.GB_FOG !== '0' };
+  // ladder = harrischristiansen/generals-bot 的移植，比 strakam 的三个基线强一个档；
+  // 它没有迷雾处理，所以迷雾下比全视野下弱得多（见 PK.md）。
   const OPPONENTS = ['random', 'expander', 'hunter', 'harvester', 'ladder'];
   // 服务器每个半回合只从队列里消费一条攻击，所以每方每回合 1 条是唯一的真实赛制。
   // 多预算对照留给 scripts/bench-budget.js，那里明确标注了是反事实实验。
