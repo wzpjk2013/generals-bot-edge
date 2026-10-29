@@ -27,6 +27,8 @@ const INJECT = `
   terrain[9] = 0;
   armies[18] = 4;      // 敌方单位
   terrain[18] = 1;
+  armies[54] = 3;      // 敌方将军，故意放远：将军不许进敌方视野圈（离敌格 >= 2 步），
+  terrain[54] = 1;     // 贴脸摆放会让引擎一步都走不出来，那是测地图的问题不是引擎的。
   const map = [w, h].concat(armies, terrain);
 
   function fire(name, payload) {
@@ -34,10 +36,10 @@ const INJECT = `
   }
 
   fire('game_start', {
-    playerIndex: 0, generals: [9, 18], cities: [], usernames: ['bot', 'enemy'],
+    playerIndex: 0, generals: [9, 54], cities: [], usernames: ['bot', 'enemy'],
     map: map.slice(), game_type: 'custom', options: { modifiers: [] }, teams: []
   });
-  fire('game_update', { turn: 1, map: map.slice(), generals: [9, 18], scores: [] });
+  fire('game_update', { turn: 1, map: map.slice(), generals: [9, 54], scores: [] });
 
   return { ok: true, emitted: sent, ready: window.__GB.state.ready, online: window.__GB.state.n };
 })()

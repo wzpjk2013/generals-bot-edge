@@ -185,8 +185,8 @@ function armyCount(board, me) {
   return c;
 }
 
-/* 一局。opponent 是参考 bot 名字，oursSide 0/1 决定谁先手 */
-function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace) {
+/* 一局。opponent 是参考 bot 名字，oursSide 0/1 决定谁先手，engineCfg 透传给 plan */
+function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineCfg) {
   if (refBudget === undefined) refBudget = ourBudget;
   const rng = mulberry32(seed);
   const board = makeMap(rng);
@@ -218,6 +218,7 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace) {
 
   let winner = -1;
   let turns = 0;
+  let idleTurns = 0; // 我们整回合一条命令都没出：引擎空转的回合数
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     turns = turn + 1;
@@ -232,8 +233,12 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace) {
       if (p === oursSide) {
         // 我们：引擎一次给出整回合的计划
         syncState(states[p], board, p);
-        states[p].turn = turn;
-        const moves = GB.bot.plan(states[p], { maxMoves: ourBudget });
+        // 引擎里的 S.turn 是服务器 tick（半个显示回合一个 tick），这里对齐成
+        // tick 单位，否则按阶段划分的阈值会被慢放一倍。
+        states[p].turn = turn * 2;
+        const enginePlan = Object.assign({}, engineCfg, { maxMoves: ourBudget });
+        const moves = GB.bot.plan(states[p], enginePlan);
+        if (!moves.length) idleTurns++;
         if (trace) {
           console.log(
             'T' + turn + ' 我方 gen=' + board.generals[oursSide] + ' 兵=' + board.armies[board.generals[oursSide]] +
@@ -279,6 +284,7 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace) {
   return {
     winner,
     turns,
+    idleTurns,
     ourLand: landCount(board, oursSide),
     enemyLand: landCount(board, 1 - oursSide),
     ourArmy: armyCount(board, oursSide),
@@ -291,7 +297,7 @@ function wald(wins, games, success, total) {
   return games ? (wins + 0.5 * (games - wins - total)) / games : 0;
 }
 
-function runCell(opponent, ourBudget, refBudget, seeds) {
+function runCell(opponent, ourBudget, refBudget, seeds, engineCfg) {
   const acc = {
     games: 0,
     wins: 0,
@@ -307,7 +313,7 @@ function runCell(opponent, ourBudget, refBudget, seeds) {
   for (let s = 0; s < seeds; s++) {
     const seed = 1000 + s * 7919;
     for (const oursSide of [0, 1]) {
-      const r = playGame(seed, opponent, ourBudget, refBudget, oursSide);
+      const r = playGame(seed, opponent, ourBudget, refBudget, oursSide, false, engineCfg);
       if (!r) {
         acc.skipped++;
         continue;
@@ -381,6 +387,13 @@ module.exports = { playGame: playGame, makeMap: makeMap };
 
 if (require.main === module) {
   const seeds = Number(process.argv[2] || 40);
+  // 单变量对照用：GB_CFG='{"earlyPush":false}' node scripts/arena.js 40
+  // （Windows PowerShell 会把命令行里的引号吃掉，用环境变量最稳）
+  let engineCfg = null;
+  for (const a of process.argv.slice(3)) {
+    if (a.startsWith('--cfg=')) engineCfg = JSON.parse(a.slice(6));
+  }
+  if (process.env.GB_CFG) engineCfg = JSON.parse(process.env.GB_CFG);
   const OPPONENTS = ['random', 'expander', 'hunter', 'harvester'];
   // 服务器每个半回合只从队列里消费一条攻击，所以每方每回合 1 条是唯一的真实赛制。
   // 多预算对照留给 scripts/bench-budget.js，那里明确标注了是反事实实验。
@@ -400,13 +413,14 @@ if (require.main === module) {
   console.log(
     '规则：1v1 全视野，格 +1/回合，城市隔回合 +1，一格一回合一动，将军死即败，' + MAX_TURNS + ' 回合未分胜负算和\n'
   );
+  if (engineCfg) console.log('引擎参数覆盖：' + JSON.stringify(engineCfg) + '\n');
 
   const summary = [];
   for (const mode of MODES) {
     console.log('== ' + mode.label + ' ==');
     header();
     for (const opp of OPPONENTS) {
-      const acc = runCell(opp, mode.our, mode.ref, seeds);
+      const acc = runCell(opp, mode.our, mode.ref, seeds, engineCfg);
       show(opp, acc);
       summary.push({ mode: mode.label, opp, acc });
     }

@@ -29,6 +29,42 @@
   // 兵源；攒着不动才有一拳打出去的兵力，每回合挤一个兵出去只会让兵永远散在路上。
   var GENERAL_SEND_MIN = 6;
 
+  // 将军作为出兵候选时的权重：小于 1 表示排在同样厚的普通堆后面。
+  var GEN_WEIGHT = 0.6;
+
+  /*
+   * 将军的三个阶段（S.turn 是服务器 tick，显示回合 = tick/2）：
+   *
+   *   早期 [0, 50)       发育期。将军每回合 +1，是全图唯一的稳定兵源，家里的兵
+   *                      还没攒起来；这时让它往外推兵、领着主纵队铺出去。
+   *   中期 [50, 480)     将军停在前线后方当兵源，攒到 6 再送。
+   *   后期 [480, ∞)      将军封存：地盘产能已经超过将军，让它出门等于把不可再生
+   *                      的兵源挪到敌方视野边上。
+   *
+   * 阈值是实测出来的。封存阈值 240 tick 是 77.5%、320 是 85.0%、480 和完全不封存
+   * 一样是 92.5%——擂台是 20x20 小图只有 5 座城，「每 25 tick 全格 +1」的地盘产能
+   * 撑不起推进，将军的兵一封存就等于把主战力锁死。所以只在拖到 240 显示回合以后
+   * 才封存。
+   */
+  var PHASE_EARLY = 50;
+  var PHASE_LATE = 480;
+
+  // 将军与敌方领土的最小保持步数。用的是「对手的视野」：官方前端的迷雾是渲染
+  // 遮罩（map.computeVisibility → 按 pov 画 FOG），地图数据本身是全量的，所以我们
+  // 知道每块敌方领土在哪；对手能看见的 = 他的领土 + 邻接一圈。离敌格 2 步还在对面
+  // 视野外，1 步就已经被看见了。实测 2 比 3 好（95.0% vs 92.5%）：留两格等于把
+  // 将军关在家里，兵流不出去。
+  var GEN_SAFE = 2;
+  // 早期将军一次能送出多少：只留 2 个看家，其余全推出去铺地。
+  var GEN_KEEP_EARLY = 2;
+
+  // 斩首要攒到对方将军兵力的这个倍数再动手。1 个兵的微弱优势打进去只是给
+  // 对方送兵，还把自己唯一的主纵队变成对面的养料。
+  var KILL_RATIO = 1.5;
+  // 掠食（默认关闭）的上下限：目标敌格不超过这么多兵才吃，出兵堆不超过这个数才动。
+  var HARVEST_TARGET_MAX = 6;
+  var HARVEST_SRC_MAX = 12;
+
   function isPassable(terrain, i) {
     var t = terrain[i];
     return t !== T.MOUNTAIN && t !== T.FOG_OBSTACLE;
@@ -108,11 +144,14 @@
     if (S._focusTurn === undefined || S.turn < S._focusTurn) {
       S._focus = -1;
       S._focusStuck = 0;
+      S._focusDir = null;
       S._preferCity = false;
     }
     S._focusTurn = S.turn;
 
     var n = S.n;
+    var SW = S.w | 0;
+    var SH = S.h | 0;
     var pid = S.playerIndex;
     var nbr = neighbors(S);
     var generals = S.generals;
@@ -139,6 +178,57 @@
     var moves = [];
     var reasons = [];
 
+    // 策略开关：默认值就是线上行为，基准脚本可以逐项关掉做单变量对照。
+    var C = cfg || {};
+    var pEarly = C.phaseEarly === undefined ? PHASE_EARLY : C.phaseEarly | 0;
+    var pLate = C.phaseLate === undefined ? PHASE_LATE : C.phaseLate | 0;
+    var gSafe = C.genSafe === undefined ? GEN_SAFE : C.genSafe | 0;
+    var killR = C.killRatio === undefined ? KILL_RATIO : Number(C.killRatio);
+    var lateFreeze = C.lateFreeze !== false;
+    var doPurge = C.purge !== false;
+    // 掠食实测是负收益（88.4% vs 89.1%），默认关闭，留着开关给以后的图用。
+    var doHarvest = C.harvest === true;
+    var genSendMin = C.genSendMin === undefined ? GENERAL_SEND_MIN : C.genSendMin | 0;
+    var genWeight = C.genWeight === undefined ? GEN_WEIGHT : Number(C.genWeight);
+
+    // 阶段：0 早期 / 1 中期 / 2 后期（将军封存）
+    var tick = S.turn | 0;
+    var phase = tick < pEarly ? 0 : tick < pLate ? 1 : 2;
+    if (phase === 2 && !lateFreeze) phase = 1;
+
+    /*
+     * 每格到最近敌方领土的步数（穿过任何可通行格）。将军靠它判断「这一步会不会
+     * 进对面视野」——迷雾是渲染层的东西，数据层我们看得见全部敌格。
+     */
+    function enemyDistField() {
+      var d = new Int32Array(n).fill(-1);
+      var q = [];
+      var i;
+      for (i = 0; i < n; i++) {
+        if (owner[i] >= 0 && owner[i] !== pid) {
+          d[i] = 0;
+          q.push(i);
+        }
+      }
+      for (var h = 0; h < q.length; h++) {
+        var cur = q[h];
+        var list = nbr[cur];
+        for (var k = 0; k < list.length; k++) {
+          var j = list[k];
+          if (d[j] !== -1 || !isPassable(owner, j)) continue;
+          d[j] = d[cur] + 1;
+          q.push(j);
+        }
+      }
+      return d;
+    }
+    var denemy = enemyDistField();
+
+    function safeForGeneral(idx) {
+      if (denemy[idx] < 0) return true; // 视野里根本没有敌格
+      return denemy[idx] >= gSafe;
+    }
+
     function move(from, to, why) {
       if (moves.length >= budget) return false;
       if (used.has(from)) return false;
@@ -157,7 +247,11 @@
           if (owner[gj] >= 0 && owner[gj] !== pid) return false;
         }
       }
+      // 将军不进敌方视野：走动必须留在安全圈外。打贴脸的敌人不受这条限制
+      // （上面的分支已经放行了「目标是敌格」的情况）。
+      if (genOut && !(owner[to] >= 0 && owner[to] !== pid) && !safeForGeneral(to)) return false;
       // 将军出兵要留底：一次送光，下一回合被贴脸就没得守了。
+      // 早期例外——这时候只有将军有余粮，留着不推等于整局不动。
       var sent = a - 1;
       if (genOut) sent = a - Math.min(GARRISON, a >> 1);
       if (sent < 1) return false;
@@ -179,10 +273,11 @@
       if (!(eg >= 0 && eg < n) || owner[eg] !== q) continue;
       var bestSrc = -1;
       var adj = nbr[eg];
+      var need = Math.ceil(armies[eg] * killR);
       for (var k = 0; k < adj.length; k++) {
         var s = adj[k];
         if (owner[s] !== pid || used.has(s)) continue;
-        if (armies[s] - 1 <= armies[eg]) continue;
+        if (armies[s] - 1 < need) continue;
         if (bestSrc < 0 || armies[s] > armies[bestSrc]) bestSrc = s;
       }
       if (bestSrc >= 0) move(bestSrc, eg, 'kill');
@@ -227,6 +322,90 @@
       }
     }
 
+    /*
+     * B3. 清剿内部入侵者。
+     *
+     * 敌人钻进我方腹地时要靠「地里的兵」并掉它，而不是抽将军、也不是把主纵队
+     * 掉头——每半回合只有一条命令，掉头一次就是推进停两个回合。
+     * 判「进了院子」看邻接：四邻里至少两个是我的格，这一格已经是我方腹地里的
+     * 飞地，它每待一回合就啃掉一块产兵地。
+     * 挑「刚好够用」的那一堆而不是最厚的：厚堆是主纵队，抽它就断了一条补给线。
+     */
+    function purgeIntruders() {
+      var bestFrom = -1;
+      var bestTo = -1;
+      var bestLeft = 1 << 30;
+      for (var i = 0; i < n; i++) {
+        if (owner[i] < 0 || owner[i] === pid) continue;
+        if (armies[i] < 1) continue;
+        var nb2 = nbr[i];
+        var ownCnt = 0;
+        var hit = -1;
+        var hitA = 1 << 30;
+        for (var k = 0; k < nb2.length; k++) {
+          var j = nb2[k];
+          if (owner[j] !== pid) continue;
+          ownCnt++;
+          // 将军的兵不动：它是产兵点，不是打手。
+          if (j === myGeneral || used.has(j)) continue;
+          if (armies[j] - 1 <= armies[i]) continue;
+          if (armies[j] < hitA) {
+            hitA = armies[j];
+            hit = j;
+          }
+        }
+        if (ownCnt < 2) continue;
+        if (hit < 0) continue; // 手里这点兵吃不下，交给推进阶段去啃
+        var left = hitA - 1 - armies[i];
+        if (left < bestLeft) {
+          bestLeft = left;
+          bestFrom = hit;
+          bestTo = i;
+        }
+      }
+      if (bestFrom < 0) return false;
+      return move(bestFrom, bestTo, 'purge');
+    }
+    if (doPurge) purgeIntruders();
+
+    /*
+     * B4. 掠食（默认关闭）：边境上比我们薄得多的敌格，一口吃掉。
+     * 照 expander「边境吃掉一切能吃的」写，但实测是负收益（88.4% vs 89.1%）：
+     * 每吃掉一块薄地就占掉一条命令，主纵队就少推一格，和它换来的地不值。
+     */
+    function harvest() {
+      var bestFrom = -1;
+      var bestTo = -1;
+      var bestGain = 1;
+      for (var i = 0; i < n; i++) {
+        if (owner[i] < 0 || owner[i] === pid) continue;
+        if (armies[i] > HARVEST_TARGET_MAX) continue;
+        var nb2 = nbr[i];
+        var hit = -1;
+        var hitA = 1 << 30;
+        for (var k = 0; k < nb2.length; k++) {
+          var j = nb2[k];
+          if (owner[j] !== pid || used.has(j) || j === myGeneral) continue;
+          if (armies[j] - 1 <= armies[i]) continue;
+          if (armies[j] > HARVEST_SRC_MAX) continue;
+          if (armies[j] < hitA) {
+            hitA = armies[j];
+            hit = j;
+          }
+        }
+        if (hit < 0) continue;
+        var gain = armies[i] + 1;
+        if (gain > bestGain) {
+          bestGain = gain;
+          bestFrom = hit;
+          bestTo = i;
+        }
+      }
+      if (bestFrom < 0) return false;
+      return move(bestFrom, bestTo, 'harvest');
+    }
+    if (doHarvest) harvest();
+
     // B2. 预警：视野内最厚的敌军在 8 步内且比将军厚，先把附近的兵并进将军
     var alarmed = defendWarn();
 
@@ -250,6 +429,31 @@
         }
       }
     }
+
+    // C2. 将军后撤：已经被压在敌方视野圈里（敌人推到脸上 / 开局贴脸）时朝远离
+    //     敌人的方向走一步。这不违反「不进视野」——是往外走。没有这一步，将军
+    //     在圈里就一步都不能动，整回合空转。
+    function retreatGeneral() {
+      if (moves.length || myGeneral < 0 || owner[myGeneral] !== pid) return false;
+      // 注意是 <=：正好卡在安全线上（denemy == gSafe）时，朝目标走一步就进圈了，
+      // 引擎在这一格既不能进也不能留，整回合空转。这时候往外挪一格是唯一动作。
+      if (denemy[myGeneral] < 0 || denemy[myGeneral] > gSafe) return false;
+      var best = -1;
+      var bestD = denemy[myGeneral];
+      var nb2 = nbr[myGeneral];
+      for (var k = 0; k < nb2.length; k++) {
+        var j = nb2[k];
+        if (!isPassable(owner, j)) continue;
+        if (owner[j] >= 0 && owner[j] !== pid) continue; // 只往空格 / 自己的地撤
+        if (denemy[j] > bestD) {
+          bestD = denemy[j];
+          best = j;
+        }
+      }
+      if (best < 0) return false;
+      return move(myGeneral, best, 'retreat');
+    }
+    if (moves.length === 0 && !alarmed) retreatGeneral();
 
     // D. 兜底：完全推不动时朝最近的敌人/最远处挪一步，别整回合空转
     if (moves.length === 0 && !alarmed) conveyor();
@@ -397,9 +601,61 @@
       return best;
     }
 
+    /*
+     * focus 刚被拿下时，沿同一个方向再推一格。
+     *
+     * 不这么做的话每拿下一格就重选「最近的敌方地块」，而最近的那块每回合都可能
+     * 是另一块，主纵队就在几块地之间来回摆。一回合一步的规则下摆动一次等于
+     * 两回合白走。方向优先沿用记录下来的推进轴，走不通再退回「朝最近敌人」。
+     */
+    function extendFocus(prev) {
+      if (!(prev >= 0 && prev < n)) return -1;
+      var px = prev % SW;
+      var py = (prev / SW) | 0;
+      var dir = S._focusDir;
+      var tries = [];
+      if (dir) {
+        tries.push([dir[0], dir[1]]);
+        if (dir[0]) tries.push([dir[0], 0]);
+        if (dir[1]) tries.push([0, dir[1]]);
+      }
+      if (myGeneral >= 0) {
+        var gx = myGeneral % SW;
+        var gy = (myGeneral / SW) | 0;
+        var sx = px === gx ? 0 : px > gx ? 1 : -1;
+        var sy = py === gy ? 0 : py > gy ? 1 : -1;
+        if (sx || sy) {
+          tries.push([sx, sy]);
+          if (sx) tries.push([sx, 0]);
+          if (sy) tries.push([0, sy]);
+        }
+      }
+      for (var t = 0; t < tries.length; t++) {
+        if (!tries[t][0] && !tries[t][1]) continue;
+        var nx = px + tries[t][0];
+        var ny = py + tries[t][1];
+        if (nx < 0 || nx >= SW || ny < 0 || ny >= SH) continue;
+        var ni = ny * SW + nx;
+        if (!isPassable(owner, ni)) continue;
+        if (owner[ni] === pid) continue;
+        S._focusDir = [tries[t][0], tries[t][1]];
+        return ni;
+      }
+      return -1;
+    }
+
     function pickFocus() {
       var prev = S._focus;
-      if (prev >= 0 && prev < n && owner[prev] !== pid) return prev;
+      if (prev >= 0 && prev < n) {
+        if (owner[prev] !== pid) return prev;
+        // 拿下了：沿原方向再推一格，别重选
+        var nxt = extendFocus(prev);
+        if (nxt >= 0) {
+          S._focus = nxt;
+          S._focusStuck = 0;
+          return nxt;
+        }
+      }
 
       // 上一次 focus 卡死了：说明正面啃不动敌将，转去吃城市——
       // 城市是除将军外唯一的稳定兵源，多一座就多一条 +1/回合的进项。
@@ -482,6 +738,12 @@
       }
       S._focus = best;
       S._focusStuck = 0;
+      S._focusDir = null;
+      if (best >= 0 && myGeneral >= 0) {
+        var bx = (best % SW) - (myGeneral % SW);
+        var by = ((best / SW) | 0) - ((myGeneral / SW) | 0);
+        if (bx || by) S._focusDir = [bx === 0 ? 0 : bx > 0 ? 1 : -1, by === 0 ? 0 : by > 0 ? 1 : -1];
+      }
       return best;
     }
 
@@ -506,19 +768,39 @@
           queue.push(j);
         }
       }
-      // 目标是空地时将军 2 兵就够出门探路；目标是硬方块才需要攒厚再打
-      var genMin = owner[goal] < 0 ? 2 : GENERAL_SEND_MIN;
+      // 目标是空地时将军攒 2 兵就够出门探路；目标是硬方块才需要攒厚再打
+      var goalHard = owner[goal] >= 0;
       var cand = [];
       for (var i = 0; i < n; i++) {
         if (owner[i] !== pid || used.has(i) || armies[i] < 2 || dist[i] <= 0) continue;
-        if (i === myGeneral && armies[i] < genMin) continue;
+        if (i === myGeneral) {
+          // 后期将军封存：地块产能已经超过将军，让它出门等于把不可再生的
+          // 兵源挪到敌方视野边上。
+          if (phase === 2) continue;
+          // 目标是空地：攒 2 个就出门铺地（这就是「将军向外推兵」）。
+          // 目标是硬方块：攒到 genSendMin 才动手，别拿将军去戳敌人的堆。
+          var genMin = goalHard ? genSendMin : 2;
+          if (armies[i] < genMin) continue;
+          // 已经在敌方视野圈边上：确认朝目标方向还有一步是安全的，否则原地攒兵。
+          if (!safeForGeneral(i)) {
+            var canStep = false;
+            var gnb = nbr[i];
+            for (var gk = 0; gk < gnb.length; gk++) {
+              if (dist[gnb[gk]] === dist[i] - 1 && isPassable(owner, gnb[gk]) && safeForGeneral(gnb[gk])) {
+                canStep = true;
+                break;
+              }
+            }
+            if (!canStep) continue;
+          }
+        }
         cand.push(i);
       }
       cand.sort(function (a, b) {
         // 将军的兵要打点折扣：它是唯一兵源，抽空了后面就补不上。
-        var sa = a === myGeneral ? armies[a] * 0.6 : armies[a];
-        var sb = b === myGeneral ? armies[b] * 0.6 : armies[b];
-        return sb - sa;
+        var wa = a === myGeneral ? genWeight : 1;
+        var wb = b === myGeneral ? genWeight : 1;
+        return armies[b] * wb - armies[a] * wa;
       });
       for (var o = 0; o < cand.length; o++) {
         var from = cand[o];
