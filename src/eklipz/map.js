@@ -337,6 +337,13 @@
       );
     }
     this._teammates_by_team[this._teammates_by_team.length - 1].push(-1);
+    // 原版 map.py:3136 在这里预分配 max(team_ids)+2 个 turn=0 的空 TeamStats，
+    // 这样 get_team_stats_lookup_by_team_id 读 _team_stats[0] 永远不是 null，
+    // 且 _team_stats[-1]（中立伪团队）落在最后一个槽位，和 Python 负索引一致。
+    this._team_stats = [];
+    for (var si = 0; si < maxTeam + 2; si++) {
+      this._team_stats.push(new TeamStats(0, 0, 0, 0, 0, 0, 0, [], [], 0, 0));
+    }
     this.friendly_team = this.team_ids_by_player_index[this.player_index];
   };
 
@@ -847,6 +854,96 @@
     return mapResult;
   };
 
+  // ---- 团队统计（对应 base/client/map.py:805 get_team_stats_by_team_id 一族）----
+  // OpponentTracker 的每个循环判断都建立在它上面，所以口径必须和原版一字不差：
+  // 缓存键是「这一份统计是哪个 turn 算的」，回合一变就整批重算（原版只比较
+  // _team_stats[0].turn）。teamId == -1 原版走特例：直接返回缓存并刷新 turn。
+  function TeamStats(tileCount, score, standingArmy, cityCount, fightingDiff, unexplainedTileDelta, teamId, teamPlayers, livingPlayers, turn, deserts) {
+    this.tileCount = tileCount;
+    this.score = score;
+    this.standingArmy = standingArmy;
+    this.cityCount = cityCount;
+    this.fightingDiff = fightingDiff;
+    this.unexplainedTileDelta = unexplainedTileDelta;
+    this.teamId = teamId;
+    this.teamPlayers = teamPlayers;
+    this.livingPlayers = livingPlayers;
+    this.turn = turn === undefined ? 0 : turn;
+    this.deserts = deserts === undefined ? 0 : deserts;
+  }
+  EK.TeamStats = TeamStats;
+
+  // Python 里 teamId == -1 的数组下标等于「取最后一个元素」，JS 不这么干，必须显式折。
+  // 原版 team_ids_by_player_index 尾部就挂着这个 -1 伪团队（_build_teams_array 里 push）。
+  function byTeamIndex(arr, teamId) {
+    if (teamId < 0) return arr[arr.length - 1];
+    return arr[teamId];
+  }
+
+  P.get_team_stats_by_team_id = function (teamId) {
+    var curStats = byTeamIndex(this._team_stats, teamId);
+
+    if (teamId === -1 && curStats !== null && curStats !== undefined) {
+      curStats.turn = this.turn;
+      return curStats;
+    }
+
+    if (curStats === null || curStats === undefined || curStats.turn !== this.turn) {
+      for (var ti = 0; ti < this.team_ids_by_player_index.length; ti++) {
+        var curTeamId = this.team_ids_by_player_index[ti];
+        var tileCount = 0;
+        var score = 0;
+        var standingArmy = 0;
+        var cities = 0;
+        var deserts = 0;
+        var fightingDiff = 0;
+        var unexplainedTileDelta = 0;
+        var teamPlayers = byTeamIndex(this._teammates_by_team, curTeamId);
+        var livingPlayers = [];
+        for (var pi = 0; pi < teamPlayers.length; pi++) {
+          // 中立伪团队的成员表是 [-1]，而 Python 的 players[-1] 取的是最后一个玩家，
+          // 所以这个伪团队的统计里混着最后一名玩家的数据 —— 原版行为，照抄。
+          var pIdx = teamPlayers[pi] < 0 ? this.players.length - 1 : teamPlayers[pi];
+          var player = this.players[pIdx];
+          tileCount += player.tileCount;
+          score += player.score;
+          standingArmy += player.standingArmy;
+          cities += player.cityCount;
+          deserts += player.deserts.length;
+          fightingDiff += player.actualScoreDelta - player.expectedScoreDelta;
+          unexplainedTileDelta += player.unexplainedTileDelta;
+          if (!player.dead) livingPlayers.push(teamPlayers[pi]);
+        }
+        var teamStats = new TeamStats(tileCount, score, standingArmy, cities, fightingDiff, unexplainedTileDelta, curTeamId, teamPlayers, livingPlayers, this.turn, deserts);
+        if (curTeamId < 0) this._team_stats[this._team_stats.length - 1] = teamStats;
+        else this._team_stats[curTeamId] = teamStats;
+        if (curTeamId === teamId) curStats = teamStats;
+      }
+    }
+
+    return curStats;
+  };
+
+  P.get_team_stats_lookup_by_team_id = function () {
+    if (this._team_stats[0] === null || this._team_stats[0] === undefined || this._team_stats[0].turn !== this.turn) {
+      this.get_team_stats_by_team_id(-1);
+    }
+    return this._team_stats;
+  };
+
+  P.get_team_stats = function (teamPlayer) {
+    var targetTeam = teamPlayer === -1 ? -1 : this.players[teamPlayer].team;
+    return this.get_team_stats_by_team_id(targetTeam);
+  };
+
+  P.is_player_on_team_with = function (player1, player2) {
+    return this.team_ids_by_player_index[player1] === this.team_ids_by_player_index[player2];
+  };
+
+  P.is_tile_on_team = function (tile, team) {
+    return team === this.team_ids_by_player_index[tile.player()];
+  };
+
   P._raw_scores_from_data = function (data) {
     var byI = {};
     var raw = data.scores || [];
@@ -854,6 +951,11 @@
     var out = [];
     for (var k = 0; k < raw.length; k++) out.push(byI[k]);
     return out;
+  };
+
+  // 原版 MapBase.get_teams_array 就是直接返回这个数组（map.py:2955）
+  Map.get_teams_array = function (map) {
+    return map.team_ids_by_player_index;
   };
 
   EK.Map = Map;
