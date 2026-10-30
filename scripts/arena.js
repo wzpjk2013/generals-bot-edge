@@ -580,7 +580,22 @@ function header() {
   );
 }
 
-module.exports = { playGame: playGame, makeMap: makeMap, runCell: runCell };
+module.exports = {
+  playGame: playGame,
+  makeMap: makeMap,
+  runCell: runCell,
+  // refpy.js（真 Python 版 Human.exe 上擂台）复用同一套棋盘规则，不另写一份
+  applyMove: applyMove,
+  makeView: makeView,
+  makeFog: makeFog,
+  updateFog: updateFog,
+  landCount: landCount,
+  armyCount: armyCount,
+  cityCount: cityCount,
+  W: W,
+  H: H,
+  N: N
+};
 
 if (require.main === module) {
   const seeds = Number(process.argv[2] || 40);
