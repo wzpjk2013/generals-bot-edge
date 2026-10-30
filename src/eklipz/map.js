@@ -412,8 +412,12 @@
     }
   });
 
+  // 原版 map.py:797-799 是 `self.turn = turn; self.clear_deltas()`；clear_deltas 里会清
+  // army_emergences。少这一句的话，上一回合的 emergence 会压住本回合新值（mapmove.js
+  // 见到 old===undefined 才落新值），迷雾推断整条链会差一格。
   P.update_turn = function (turn) {
     this.turn = turn;
+    this.clear_deltas();
   };
 
   P.update_scores = function (scores) {

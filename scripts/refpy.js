@@ -145,16 +145,23 @@ function scoresFor(board) {
   return out;
 }
 
-/* 一方的视野 → 服务器串行化数组（看不见的格是 FOG / FOG_OBSTACLE，兵数 0） */
-function serialize(board, me, fog) {
+/* 一方的视野 → 服务器串行化数组（看不见的格是 FOG / FOG_OBSTACLE，兵数 0）
+ *
+ * vis 是 updateFog 返回的「本回合可见」位图，**必须传**：可见性不能从 fog.owner 反推。
+ * 中立城的 fog.owner 是 -1，看不见的城是 FOG_OBSTACLE(-4)，两者都不满足 >= 0，
+ * 曾经的写法（`fog.owner[i] >= 0` 才算城）等于把中立城整个吞掉 —— 真服务器不是这样，
+ * 它靠 vis 位图决定 cities_diff 里给哪些城。不传 vis 时按「全可见」处理。
+ */
+function serialize(board, me, fog, vis) {
   const armies = new Array(N);
   for (let i = 0; i < N; i++) armies[i] = fog.armies[i];
   const map = [W, H].concat(armies, Array.from(fog.owner));
+  const isVisible = (i) => (vis ? vis[i] === 1 : true);
   const cities = [];
-  for (let i = 0; i < N; i++) if (board.cities[i] && fog.owner[i] >= 0) cities.push(i);
+  for (let i = 0; i < N; i++) if (board.cities[i] && isVisible(i)) cities.push(i);
   const generals = [];
   for (const p of [0, 1]) {
-    if (fog.owner[board.generals[p]] >= 0 && board.generals[p] >= 0) generals.push(board.generals[p]);
+    if (board.generals[p] >= 0 && isVisible(board.generals[p])) generals.push(board.generals[p]);
   }
   return { map: map, cities: cities, generals: generals };
 }
@@ -195,7 +202,8 @@ async function playGamePy(seed, opponent, pySide, opts) {
 
   try {
     // 开局：正式服务器 game_start 不带地图，第一包 game_update 才有
-    const st = serialize(board, pySide, fogs ? fogs[pySide] : { owner: board.owner, armies: board.armies });
+    const vis0 = fogs ? A.updateFog(fogs[pySide], board, pySide) : null;
+    const st = serialize(board, pySide, fogs ? fogs[pySide] : { owner: board.owner, armies: board.armies }, vis0);
     await py.start(startDataFor(board, pySide), Object.assign({ turn: 1, scores: scoresFor(board) }, {
       map_diff: fullDiff(st.map),
       cities_diff: fullDiff(st.cities),
@@ -210,7 +218,7 @@ async function playGamePy(seed, opponent, pySide, opts) {
         if (board.owner[board.generals[p]] !== p) continue;
         const vis = fogs ? A.updateFog(fogs[p], board, p) : null;
         if (p === pySide) {
-          const st2 = serialize(board, p, fogs ? fogs[p] : { owner: board.owner, armies: board.armies });
+          const st2 = serialize(board, p, fogs ? fogs[p] : { owner: board.owner, armies: board.armies }, vis);
           const move = await py.turn({
             turn: turn + 1,
             map_diff: fullDiff(st2.map),

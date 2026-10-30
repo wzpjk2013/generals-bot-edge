@@ -71,7 +71,8 @@ async function main() {
   const t0 = Date.now();
   let turns = 0;
   try {
-    const st = serialize(board, pySide, fogs ? fogs[pySide] : { owner: board.owner, armies: board.armies });
+    const vis0 = fogs ? A.updateFog(fogs[pySide], board, pySide) : null;
+    const st = serialize(board, pySide, fogs ? fogs[pySide] : { owner: board.owner, armies: board.armies }, vis0);
     const firstData = {
       turn: 1,
       scores: scoresFor(board),
@@ -97,7 +98,7 @@ async function main() {
         if (board.owner[board.generals[p]] !== p) continue;
         const vis = fogs ? A.updateFog(fogs[p], board, p) : null;
         if (p === pySide) {
-          const st2 = serialize(board, p, fogs ? fogs[p] : { owner: board.owner, armies: board.armies });
+          const st2 = serialize(board, p, fogs ? fogs[p] : { owner: board.owner, armies: board.armies }, vis);
           const data = {
             turn: turn + 1,
             map_diff: fullDiff(st2.map),

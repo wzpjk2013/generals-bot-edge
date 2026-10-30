@@ -67,9 +67,11 @@
       return a.length === b.length ? 0 : a.length < b.length ? -1 : 1;
     }
 
-    // Tile / PathMove 之类的对象：用 tile_index 兜底，保证比较是全序且确定的
+    // Tile / PathMove 之类的对象：按 Python Tile.__lt__ 只比 army，平局返回 0
     if (a.tile_index !== undefined && b.tile_index !== undefined) {
-      return a.tile_index < b.tile_index ? -1 : a.tile_index > b.tile_index ? 1 : 0;
+      var aa = a.army === undefined ? 0 : a.army;
+      var ba = b.army === undefined ? 0 : b.army;
+      return aa < ba ? -1 : aa > ba ? 1 : 0;
     }
     if (a.tile !== undefined && b.tile !== undefined) return cmpVals(a.tile, b.tile);
     return 0;
@@ -99,27 +101,45 @@
       i = parent;
     }
   };
+  function _siftdown(q, startpos, pos) {
+    var newitem = q[pos];
+    while (pos > startpos) {
+      var parentpos = (pos - 1) >> 1;
+      var parent = q[parentpos];
+      if (cmpVals(newitem, parent) < 0) {
+        q[pos] = parent;
+        pos = parentpos;
+        continue;
+      }
+      break;
+    }
+    q[pos] = newitem;
+  }
+
+  function _siftup(q, pos) {
+    var endpos = q.length;
+    var startpos = pos;
+    var newitem = q[pos];
+    var childpos = 2 * pos + 1;
+    while (childpos < endpos) {
+      var rightpos = childpos + 1;
+      if (rightpos < endpos && !(cmpVals(q[childpos], q[rightpos]) < 0)) childpos = rightpos;
+      q[pos] = q[childpos];
+      pos = childpos;
+      childpos = 2 * pos + 1;
+    }
+    q[pos] = newitem;
+    _siftdown(q, startpos, pos);
+  }
+
   HeapQueue.prototype.get = function () {
     var q = this.queue;
-    var top = q[0];
-    var last = q.pop();
-    if (q.length > 0) {
-      q[0] = last;
-      var i = 0;
-      for (;;) {
-        var l = 2 * i + 1;
-        var r = l + 1;
-        var smallest = i;
-        if (l < q.length && cmpVals(q[l], q[smallest]) < 0) smallest = l;
-        if (r < q.length && cmpVals(q[r], q[smallest]) < 0) smallest = r;
-        if (smallest === i) break;
-        var tmp = q[i];
-        q[i] = q[smallest];
-        q[smallest] = tmp;
-        i = smallest;
-      }
-    }
-    return top;
+    var lastelt = q.pop();
+    if (q.length === 0) return lastelt;
+    var returnitem = q[0];
+    q[0] = lastelt;
+    _siftup(q, 0);
+    return returnitem;
   };
   Object.defineProperty(HeapQueue.prototype, 'size', {
     get: function () {
@@ -132,47 +152,61 @@
     }
   });
 
-  /* heapq_max 的等价物：比较反向。 */
+  /* heapq_max 的等价物：比较反向。
+   *
+   * 必须逐位照抄 CPython 的 _siftdown_max/_siftup_max：并列优先级时候选人「相等不交换」，
+   * 出队顺序完全由堆结构决定。换成常规「下沉取最大值」写法，平局就会挑到别的元素，
+   * GatherPrune 里 348 组里有 93 组首招直接错。
+   */
   function HeapQueueMax() {
     this.queue = [];
+  }
+  function _siftdown_max(q, startpos, pos) {
+    var newitem = q[pos];
+    while (pos > startpos) {
+      var parentpos = (pos - 1) >> 1;
+      var parent = q[parentpos];
+      if (cmpVals(newitem, parent) > 0) {
+        q[pos] = parent;
+        pos = parentpos;
+        continue;
+      }
+      break;
+    }
+    q[pos] = newitem;
+  }
+  function _siftup_max(q, pos) {
+    var endpos = q.length;
+    var startpos = pos;
+    var newitem = q[pos];
+    var childpos = 2 * pos + 1;
+    while (childpos < endpos) {
+      var rightpos = childpos + 1;
+      // 注意 CPython 这里写成 `not heap[rightpos] < heap[childpos]`，不是对称的 <
+      if (rightpos < endpos && !(cmpVals(q[rightpos], q[childpos]) < 0)) childpos = rightpos;
+      q[pos] = q[childpos];
+      pos = childpos;
+      childpos = 2 * pos + 1;
+    }
+    q[pos] = newitem;
+    _siftdown_max(q, startpos, pos);
   }
   HeapQueueMax.prototype._put = function (item) {
     var q = this.queue;
     q.push(item);
-    var i = q.length - 1;
-    while (i > 0) {
-      var parent = (i - 1) >> 1;
-      if (cmpVals(q[i], q[parent]) <= 0) break;
-      var tmp = q[i];
-      q[i] = q[parent];
-      q[parent] = tmp;
-      i = parent;
-    }
+    _siftdown_max(q, 0, q.length - 1);
   };
   HeapQueueMax.prototype.put = function (item) {
     this._put(item);
   };
   HeapQueueMax.prototype.get = function () {
     var q = this.queue;
-    var top = q[0];
-    var last = q.pop();
-    if (q.length > 0) {
-      q[0] = last;
-      var i = 0;
-      for (;;) {
-        var l = 2 * i + 1;
-        var r = l + 1;
-        var largest = i;
-        if (l < q.length && cmpVals(q[l], q[largest]) > 0) largest = l;
-        if (r < q.length && cmpVals(q[r], q[largest]) > 0) largest = r;
-        if (largest === i) break;
-        var tmp = q[i];
-        q[i] = q[largest];
-        q[largest] = tmp;
-        i = largest;
-      }
-    }
-    return top;
+    var lastelt = q.pop();
+    if (q.length === 0) return lastelt;
+    var returnitem = q[0];
+    q[0] = lastelt;
+    _siftup_max(q, 0);
+    return returnitem;
   };
   Object.defineProperty(HeapQueueMax.prototype, 'size', {
     get: function () {
