@@ -262,6 +262,12 @@ function landCount(board, me) {
   return c;
 }
 
+function cityCount(board, me) {
+  let c = 0;
+  for (let i = 0; i < N; i++) if (board.cities[i] && board.owner[i] === me) c++;
+  return c;
+}
+
 function armyCount(board, me) {
   let c = 0;
   for (let i = 0; i < N; i++) if (board.owner[i] === me) c += board.armies[i];
@@ -434,11 +440,23 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
     //   每 2 个半回合（=1 个显示回合）将军 +1、城市 +1、沼泽 -1；
     //   每 50 个半回合（=25 个显示回合，即"一轮"）每个已占格 +1。
     // 也就是说地盘本身几乎不产兵，兵源是将军和城市——这是 generals.io 的经济核心。
+    //
+    // GB_INCOME=fast（旧口径）是按「每 tick 将军/城市 +1、每 25 tick 全格 +1」跑的，
+    // 也就是真实节奏的两倍。擂台上两边都吃两倍，比较还公平，但兵会攒到
+    // 1000+、局长翻倍，tune 出来的东西搬不回真服。默认改成 real。
+    const t1 = turn + 1;
+    const fast = process.env.GB_INCOME === 'fast';
     for (let i = 0; i < N; i++) {
       const o = board.owner[i];
       if (o < 0) continue;
-      if (i === board.generals[o] || board.cities[i]) board.armies[i] += 1;
-      if (turn % 25 === 24) board.armies[i] += 1;
+      const isProduce = i === board.generals[o] || board.cities[i];
+      if (fast) {
+        if (isProduce) board.armies[i] += 1;
+        if (t1 % 25 === 0) board.armies[i] += 1;
+      } else {
+        if (isProduce && t1 % 2 === 0) board.armies[i] += 1;
+        if (t1 % 50 === 0) board.armies[i] += 1;
+      }
     }
   }
 
@@ -451,7 +469,9 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
     ourLand: landCount(board, oursSide),
     enemyLand: landCount(board, 1 - oursSide),
     ourArmy: armyCount(board, oursSide),
-    enemyArmy: armyCount(board, 1 - oursSide)
+    enemyArmy: armyCount(board, 1 - oursSide),
+    ourCities: cityCount(board, oursSide),
+    enemyCities: cityCount(board, 1 - oursSide)
   };
 }
 

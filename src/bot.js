@@ -282,6 +282,35 @@
     var stickyBlob = C.stickyBlob !== false;
     // 守将判定按「还有几回合到」算（见 defendWarn）
     var holdCheck = C.holdCheck !== false;
+    // 城：买城的门槛（见 pickFocus 的城闸门注释）
+    var cityEager = C.cityEager === true;
+    var cityMargin = C.cityMargin === undefined ? 4 : C.cityMargin | 0;
+    var cityFirst = C.cityFirst === true;
+    if (!S._cstats || S._cstats.n !== n) S._cstats = { n: n, seen: 0, turns: 0, maxBest: 0, enemyOwned: 0 };
+    var CST = S._cstats;
+    (function () {
+      var vis = 0, mx = 0;
+      for (var q = 0; q < n; q++) {
+        if (owner[q] === pid && armies[q] > mx) mx = armies[q];
+        if (isCity[q] && owner[q] !== pid) vis++;
+      }
+      CST.turns++;
+      CST.seen += vis;
+      if (mx > CST.maxBest) CST.maxBest = mx;
+    })();
+    var cityRatio = C.cityRatio === undefined ? 2 : Number(C.cityRatio);
+    // 打敌格的最小余量（0 = 只要求打得过，见 move()）
+    var attackMargin = C.attackMargin === undefined ? 0 : C.attackMargin | 0;
+    /*
+     * 集兵周期（cycles）：Human.exe 的节奏是「扩一段、集一段、打一段」，不是一路推。
+     * 每 cycleLen 个 tick 里最后 gatherLen 个 tick 停止吃地，只把兵往 focus 上并——
+     * 这样前线才攒得出一拳。
+     */
+    var cycles = C.cycles === true;
+    var cycleLen = C.cycleLen === undefined ? 30 : C.cycleLen | 0;
+    var gatherLen = C.gatherLen === undefined ? 10 : C.gatherLen | 0;
+    var gatherPhase = cycles && tick % cycleLen >= cycleLen - gatherLen;
+    var cityGather = C.cityGather === true;
     /*
      * rail 排序默认还是「从厚到薄」，不是「从前沿往后倒灌」。
      *
@@ -659,6 +688,8 @@
       if (sent < 1) return false;
       // 往自己的格子并兵永远合法（只损耗 1），往敌人格必须打得过
       if (!own && sent <= armies[to]) return false;
+      // 打敌格要留余量：20 打 19 只是拿 19 个兵换 0 格，对面下回合又补回来
+      if (attackMargin > 0 && owner[to] >= 0 && owner[to] !== pid && sent < armies[to] + attackMargin) return false;
       var wasNeutral = owner[to] < 0;
       armies[to] = own ? sent + armies[to] : sent - armies[to];
       armies[from] = a - sent;
@@ -1013,7 +1044,8 @@
       }
       for (i = 0; i < n; i++) {
         if (!isCity[i] || owner[i] === pid || dist[i] < 0) continue;
-        if (cityGate && maxOur < armies[i] * 2 + 6) continue;
+
+        if (cityGate && (cityEager ? maxOur < armies[i] + cityMargin : maxOur < armies[i] * 2 + 6)) continue;
         if (dist[i] < bd) {
           bd = dist[i];
           best = i;
@@ -1221,7 +1253,35 @@
       // 最近的敌方地块
       var best = -1;
       var bestD = Infinity;
-      for (i = 0; i < n; i++) {
+      /*
+       * 城优先（cityFirst）：看得见、打得动、够得着的城，排在「最近的敌格」前面。
+       *
+       * 原来这段城判定藏在下面的 `if (best < 0)` 里——也就是「视野里一个敌格都
+       * 没有」才考虑城。可中局以后双方基本互相看得见，于是整局都不会去想城。
+       * 量出来就是：对 kutu 二十局，我们终局城 0.15 座、对面 0.75 座。一座城是
+       * +1 兵/2 tick，一格地是 +1 兵/50 tick，差的这 0.6 座城在 400 回合里就是
+       * 一百多兵，和终局兵差（538 : 623）对得上。
+       */
+      if (cityFirst) {
+        var maxOurCF = 0;
+        for (i = 0; i < n; i++) if (owner[i] === pid && armies[i] > maxOurCF) maxOurCF = armies[i];
+        var cfBest = -1;
+        var cfD = Infinity;
+        for (i = 0; i < n; i++) {
+          if (!isCity[i] || owner[i] === pid || dist[i] < 0) continue;
+          if (dist[i] > cityNear) continue;
+          if (maxOurCF < armies[i] * cityRatio + 4) continue;
+          if (dist[i] < cfD) {
+            cfD = dist[i];
+            cfBest = i;
+          }
+        }
+        if (cfBest >= 0) {
+          best = cfBest;
+          bestD = cfD;
+        }
+      }
+      for (i = 0; i < n && best < 0; i++) {
         if (owner[i] < 0 || owner[i] === pid || dist[i] < 0) continue;
         if (dist[i] < bestD) {
           bestD = dist[i];
@@ -1313,7 +1373,7 @@
           for (i = 0; i < n; i++) {
             if (!isCity[i] || owner[i] === pid || dist[i] < 0) continue;
             if (armies[i] + 1 > maxOur) continue; // 打不动，别把兵喂进去
-            if (cityGate && maxOur < armies[i] * 2 + 6) continue; // 打完剩不下本钱
+            if (cityGate && (cityEager ? maxOur < armies[i] + cityMargin : maxOur < armies[i] * 2 + 6)) continue; // 打完剩不下本钱
             if (dist[i] > cityNear) continue; // 远城不追，见注释
             if (dist[i] < cd) {
               cd = dist[i];
@@ -1425,6 +1485,13 @@
        *      内部搬运门槛），而且要优先并到已经有兵的前锋堆上——那样下一回合
        *      前锋才有厚度推出去。
        */
+      var cityStall = false;
+      if (cityGather && S._goalCity && goal >= 0 && isCity[goal] && owner[goal] !== pid) {
+        var mo = 0;
+        for (var mi = 0; mi < n; mi++) if (owner[mi] === pid && armies[mi] > mo) mo = armies[mi];
+        if (mo < armies[goal] + 6) cityStall = true;
+      }
+      if (cityStall) gatherPhase = true;
       var front = [];
       var rail = [];
       for (var i = 0; i < n; i++) {
@@ -1471,6 +1538,7 @@
       DBG.calls.push(goal + '[f' + front.length + ',r' + rail.length + ',d' + (myGeneral >= 0 ? dist[myGeneral] : -9) + ']');
 
       // 1. 前锋：紧贴目标，兵最多的先推
+      if (gatherPhase) front.length = 0;
       front.sort(function (a, b) {
         return armies[b] * weight(b) - armies[a] * weight(a);
       });
@@ -1513,7 +1581,7 @@
        * 背景：kutu/oim 那两档我们地被压到 33 : 103、兵 398 : 1339。同样每回合
        * 一条命令，它们 20% 以上的手在吃地，我们只有 12%，另外一半在自家搬。
        */
-      if (doFrontGrow) {
+      if (doFrontGrow && !gatherPhase) {
         var ourMinD = Infinity;
         for (var md = 0; md < n; md++) {
           if (owner[md] === pid && dist[md] >= 0 && dist[md] < ourMinD) ourMinD = dist[md];
@@ -1799,6 +1867,7 @@
     DBG.rail = DBG.rail || 0;
     DBG.focus = S._focus;
     // 记下本回合下发的逆向 key，下一回合不许原路走回来（见 move() 的 antiReverse）
+    GB.cityStats = S._cstats;
     S._prevKeys = [];
     for (var mk = 0; mk < moves.length; mk++) S._prevKeys.push(moves[mk][1] + '>' + moves[mk][0]);
     return moves;
