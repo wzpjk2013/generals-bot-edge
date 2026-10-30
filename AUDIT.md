@@ -295,3 +295,19 @@ node scripts/ab.js 60                                       # 镜像 A/B：两�
 换战线时离敌人更远是正常操作，闸门分不出来，于是把主纵队的补给全掐了。
 真正能砍的是「目标本身就不该选」（打不动的格子、跑不到的城），不是「这一步
 方向看着不对」。
+
+## 2026-10-30 转向 Human.exe（EklipZ_ai）移植线
+
+完整记录见 `E:\akcoco6de\_research\audit-humanexe.md`，这里只留结论：
+
+- 真身是 https://github.com/EklipZgit/generals-bot（227 个 .py / 138218 行），
+  逐行搬进扩展不现实，改走「按机制移植」。
+- https://github.com/EklipZgit/generals-ai（2017 单文件，524 行）**不是**它：
+  移植到 `scripts/refbots/eklipz.js` 后 vs gc 0.0% / vs szly 2.5% / vs hunter 0.0%
+  / vs random 全和。原版 `helpers.apply_move()` 遇到 FOG 直接 raise，一步都不进黑区
+  （499 手里进黑 0 手）。留着当弱对手，别拿它当基准。
+- 新增 `scripts/refpk.js`（参考 bot 互打）、arena 的 `opts.refA` 与 `refStats`。
+- `genGuess`（敌将预测）按 README 第 5 条实现了，40 种子 × 80 局/对手净效应在噪声里，
+  默认关。
+- `frontGrow`（沿路扩地）**有效，默认开**：镜像 A/B 120 局已分胜负 57.7%，
+  地盘 72.8 vs 50.7；打参考 bot 合计 45.3% → 47.8%（kutu 30.0→35.0，oim 28.7→32.5）。

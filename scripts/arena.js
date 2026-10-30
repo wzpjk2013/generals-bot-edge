@@ -304,11 +304,14 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
 
   const refRng = mulberry32(seed ^ 0x9e3779b9);
   const ref = opponent === 'engine' ? null : makeRefAgent(opponent, refRng);
+  // 移植对手互打（refpk.js 用）：opts.refA 一开，我方那一半也换成参考 bot
+  const refA = opts && opts.refA ? makeRefAgent(opts.refA, mulberry32(seed ^ 0x5bf03635)) : null;
 
   let winner = -1;
   let turns = 0;
   let idleTurns = 0; // 我们整回合一条命令都没出：引擎空转的回合数
   const stats = { attack: 0, rail: 0, merge: 0, spread: 0 }; // 出子构成：打 / 自家搬 / 占地
+  const refStats = { selfMoves: 0, captures: 0 }; // 参考 bot 的出子构成
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     turns = turn + 1;
@@ -326,6 +329,20 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
       const view = makeView(board, me, fogs ? fogs[p] : null, vis);
 
       if (p === oursSide || opponent === 'engine') {
+        if (refA) {
+          for (let k = 0; k < ourBudget; k++) {
+            const act = refA.plan(view);
+            if (!act) break;
+            if (!applyMove(board, me, act.from, act.to, act.split)) break;
+            if (trace) console.log('T' + turn + ' A ' + act.from + '>' + act.to + ' split=' + act.split);
+            if (board.owner[board.generals[enemy]] === me) {
+              winner = me;
+              break;
+            }
+          }
+          if (winner >= 0) break;
+          continue;
+        }
         // 引擎侧：一次给出整回合的计划（opponent === 'engine' 时两边都是引擎，镜像局）
         if (fogs) {
           states[p].terrain.set(fogs[p].owner);
@@ -383,6 +400,12 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
         for (let k = 0; k < refBudget; k++) {
           const act = ref.plan(view);
           if (!act) break;
+          // 参考 bot 的出子构成（吃地 / 自家搬），用来和引擎对表
+          if (k === 0 && refStats) {
+            const to = act.to;
+            if (board.owner[to] === me) refStats.selfMoves++;
+            else refStats.captures++;
+          }
           if (!applyMove(board, me, act.from, act.to, act.split)) break;
           if (trace) console.log('T' + turn + ' 对方 ' + act.from + '>' + act.to + ' split=' + act.split);
           if (board.owner[board.generals[enemy]] === me) {
@@ -412,6 +435,7 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
     turns,
     idleTurns,
     stats,
+    refStats,
     ourLand: landCount(board, oursSide),
     enemyLand: landCount(board, 1 - oursSide),
     ourArmy: armyCount(board, oursSide),

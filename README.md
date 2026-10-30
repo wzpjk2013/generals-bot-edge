@@ -211,6 +211,7 @@ scripts/refagents.js    参考 bot 移植（random / expander / hunter / harvest
 scripts/refbots/        从 LocalGen-new 源码逐个移植的强对手（放进来就自动注册）
 scripts/refbots/smoke.js 单个移植对手的冒烟：$env:GB_BOT='oim'; node scripts/refbots/smoke.js 20
 scripts/arena.js        与参考 bot 的 1v1 擂台（GB_FOG=0 切全视野，GB_OPP='gc,oim' 只跑指定对手）
+scripts/refpk.js        参考 bot 互打：node scripts/refpk.js eklipz gc 20（判断移植本身有多强）
 scripts/ab.js           镜像 A/B：同一份代码、不同参数对打，50% 就是没差别
 scripts/mirror.js       引擎打自己，查走子顺序 / 阵营有没有系统性偏差
 scripts/pk-report.js    强对手 PK 报告（Markdown 表格，GB_WRITE=1 写 PK.md，GB_WEAK=1 加弱基线）

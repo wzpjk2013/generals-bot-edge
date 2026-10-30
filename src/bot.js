@@ -272,6 +272,11 @@
      * 现在改由 focusNear（目标太远就吃手边的）来解决同一个问题，主纵队不掉头。
      */
     var expandStuck = C.expandStuck === true;
+    // 沿路扩地：贴着前沿的厚堆直接吃邻格（见 supply() 里的 2b）
+    var doFrontGrow = C.frontGrow !== false;
+    // 沿路扩地的门槛：出兵格至少多少兵、目标格要留多少余量
+    var frontGrowMin = C.frontGrowMin === undefined ? 6 : C.frontGrowMin | 0;
+    var frontGrowMargin = C.frontGrowMargin === undefined ? 1 : C.frontGrowMargin | 0;
     /*
      * rail 排序默认还是「从厚到薄」，不是「从前沿往后倒灌」。
      *
@@ -354,6 +359,81 @@
         M.turn[m] = tick;
       }
     }
+
+    /*
+     * 敌将预测：从「刚出黑的敌格」反推（Human.exe 的招牌之一）。
+     *
+     * 迷雾里看不见敌格，但敌人一旦把兵开出黑区、吃到我们看得见的地方，那一格就
+     * 暴露了。那一格背后连着的那片黑区里，越靠近它的地方越可能是它的来路——
+     * 兵是从家里/城/将军那儿走出来的，不是从天上掉的。
+     *
+     * 所以每出现一个「上一回合还是 FOG、这一回合是敌格」的格子，就从它往黑区里
+     * 凿 R 步，路过的每个黑格加 1/(1+距离) 分。分数跨回合累积、每回合乘 0.985 衰减。
+     * 取分数最高的那个黑格当「猜的敌将位置」，focus 在看不见敌人时先往那儿推。
+     *
+     * 这条路子不需要任何模型：敌将周围一定有兵在往外走，走得越多、暴露越多次，
+     * 那片黑区就被反复加权。回放里真正被猜中的情况，是 focus 直接压到敌将脸上。
+     */
+    var doGuess = C.genGuess === true;
+    var FG = S._fg;
+    if (!FG || FG.n !== n) {
+      FG = S._fg = {
+        n: n,
+        score: new Float32Array(n),
+        prev: new Int16Array(n).fill(T.FOG),
+        guess: -1,
+        top: 0
+      };
+    }
+    if (doGuess) {
+      var f;
+      for (f = 0; f < n; f++) FG.score[f] *= 0.985;
+      var seeds = [];
+      for (f = 0; f < n; f++) {
+        var ct = owner[f];
+        if (ct < 0 || ct === pid) continue;
+        var pt = FG.prev[f];
+        if (pt === T.FOG || pt === T.FOG_OBSTACLE) seeds.push(f);
+      }
+      for (var s = 0; s < seeds.length; s++) {
+        var src = seeds[s];
+        var sd = new Int32Array(n).fill(-1);
+        sd[src] = 0;
+        var sq = [src];
+        for (var sh = 0; sh < sq.length; sh++) {
+          var scur = sq[sh];
+          if (sd[scur] >= 10) continue;
+          var sl = nbr[scur];
+          for (var sk = 0; sk < sl.length; sk++) {
+            var sn = sl[sk];
+            if (sd[sn] >= 0) continue;
+            var so = owner[sn];
+            if (so !== T.FOG && so !== T.FOG_OBSTACLE) continue;
+            sd[sn] = sd[scur] + 1;
+            sq.push(sn);
+          }
+        }
+        for (var sv = 0; sv < n; sv++) {
+          if (sd[sv] >= 0) FG.score[sv] += 1 / (1 + sd[sv]);
+        }
+      }
+      var gBest = -1;
+      var gTop = 0;
+      for (f = 0; f < n; f++) {
+        var go = owner[f];
+        if (go !== T.FOG && go !== T.FOG_OBSTACLE) continue;
+        if (FG.score[f] > gTop) {
+          gTop = FG.score[f];
+          gBest = f;
+        }
+      }
+      FG.guess = gTop >= 1.5 ? gBest : -1;
+      FG.top = gTop;
+    } else {
+      FG.guess = -1;
+      FG.top = 0;
+    }
+    FG.prev.set(owner);
 
     /*
      * 每格到最近敌方领土的步数（穿过任何可通行格）。将军靠它判断「这一步会不会
@@ -1162,6 +1242,23 @@
          */
         var memBest = -1;
         var memScore = Infinity;
+        /*
+         * 0.5 猜的敌将：出黑点反推出来的那片黑区里分数最高的格子。
+         *
+         * 压在记忆线索前面用，因为「敌人最后出现的地方」只是它某一支部队的位置，
+         * 而敌将预测是几十次暴露累积出来的方向。要求有两堆以上的本钱才动身，
+         * 不然就是拿一条空队列去撞黑区。
+         */
+        if (doGuess && FG.guess >= 0 && dist[FG.guess] >= 0) {
+          var gArmy = 0;
+          for (i = 0; i < n; i++) if (owner[i] === pid && armies[i] > gArmy) gArmy = armies[i];
+          if (gArmy >= 8 && dist[FG.guess] <= 26) {
+            S._focus = FG.guess;
+            S._focusStuck = 0;
+            S._focusDir = null;
+            return FG.guess;
+          }
+        }
         if (M) {
           for (i = 0; i < n; i++) {
             if (owner[i] !== T.FOG && owner[i] !== T.FOG_OBSTACLE) continue;
@@ -1386,6 +1483,49 @@
        * （被山和敌人围住）时，才退回去沿链搬兵。
        */
       if (expandStuck && expandStep()) return true;
+
+      /*
+       * 2b. 沿路扩地（frontGrow）：前锋够不着目标时，让贴着前沿、又吃得动邻格的
+       *     那一堆直接把旁边那格吃掉，而不是折回自家格子里搬兵。
+       *
+       * 为什么和 expandStep 不一样：expandStep 是「全图最便宜的空格」，谁厚就从
+       * 谁身上抽 1 个兵，主纵队会被抽散（1.1.6 实测 58.8% / 38.8%，基线
+       * 63.7% / 56.3%）。这里只认**前沿那一圈**：dist 已经是我们己方最小值的格
+       * 子（或次小），兵够厚就吃。它换的是 +1 地，而且纵队整体是在往前挪。
+       *
+       * 背景：kutu/oim 那两档我们地被压到 33 : 103、兵 398 : 1339。同样每回合
+       * 一条命令，它们 20% 以上的手在吃地，我们只有 12%，另外一半在自家搬。
+       */
+      if (doFrontGrow) {
+        var ourMinD = Infinity;
+        for (var md = 0; md < n; md++) {
+          if (owner[md] === pid && dist[md] >= 0 && dist[md] < ourMinD) ourMinD = dist[md];
+        }
+        var fgBest = -1;
+        var fgBestA = 0;
+        var fgTo = -1;
+        var fgD = Infinity;
+        for (var q = 0; q < n; q++) {
+          if (owner[q] !== pid || used.has(q) || dist[q] < 0) continue;
+          if (dist[q] > ourMinD + 2) continue;
+          if (armies[q] < frontGrowMin) continue;
+          if (q === myGeneral && (phase === 2 || armies[q] < genSend)) continue;
+          var qn = nbr[q];
+          for (var qk = 0; qk < qn.length; qk++) {
+            var qj = qn[qk];
+            if (owner[qj] === pid || !isPassable(owner, qj)) continue;
+            if (armies[qj] + frontGrowMargin >= armies[q]) continue;
+            var qd = dist[qj] >= 0 ? dist[qj] : dist[q];
+            if (qd < fgD || (qd === fgD && armies[q] > fgBestA)) {
+              fgD = qd;
+              fgBestA = armies[q];
+              fgBest = q;
+              fgTo = qj;
+            }
+          }
+        }
+        if (fgBest >= 0 && move(fgBest, fgTo, 'grow')) return true;
+      }
 
       // 3. 集兵：后方一堆往前搬一格，优先并到已经有兵的格子上
       var railScore = new Map();
