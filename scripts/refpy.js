@@ -105,6 +105,9 @@ class PyBot {
       this.errors++;
       throw new Error('bridge turn 失败:\n' + r.error);
     }
+    // 原版 find_move 自己抛异常（它有一堆作者承認的 off-by-one）时，线上就是
+    // 这回合不出招。照线上一模一样地掉一回合，别当整局失败。
+    if (r.err) this.botErrors = (this.botErrors || 0) + 1;
     this.turnMs += r.ms || 0;
     return r.move;
   }
