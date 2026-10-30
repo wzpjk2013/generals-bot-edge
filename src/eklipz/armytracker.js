@@ -100,6 +100,13 @@
     return { cityCount: cityCount, teamPlayers: teamPlayers };
   }
 
+  /* map.py 的 _teammates_by_player_no_self 在 JS 侧没建，这里按同样语义现算 */
+  function getTeammatesNoSelf(map, player) {
+    var all = map.get_teammates(player) || [];
+    var self = player;
+    return all.filter(function (p) { return p !== self; });
+  }
+
   function removeFromArray(arr, item) {
     var at = arr.indexOf(item);
     if (at >= 0) arr.splice(at, 1);
@@ -108,7 +115,19 @@
   function toArray(coll) {
     if (coll === null || coll === undefined) return [];
     if (Array.isArray(coll)) return coll;
+    // MapMatrix/MapMatrixSet 不是 iterable，Python 里那些 set 被搬成了平表索引。
+    if (coll.raw && typeof coll.toTiles === 'function') return coll.toTiles();
+    if (coll.raw && typeof coll.keys === 'function') return coll.keys();
     return Array.from(coll);
+  }
+
+  function removeFromCollection(coll, item) {
+    if (coll === null || coll === undefined) return;
+    if (typeof coll.delete === 'function') {
+      coll.delete(item);
+      return;
+    }
+    if (typeof coll.discard === 'function') coll.discard(item);
   }
 
   function flattenPathTiles(paths) {
@@ -979,8 +998,13 @@
 
     this.scrap_unmoved_low_armies();
 
-    trackingArmies.forEach(function (army, tile3) {
-      self.armies.set(tile3, army);
+    /*
+     * 键必须取 army.tile 而不是 trackingArmies 的键：trackingArmies 里可能残留在
+     * 旧格键上的 army（army_moved 已经把 army.tile 推到新格），按旧键落库会在
+     * self.armies 里留两个键指向同一支军队，下一回合就会凭空多出一支幽灵军队。
+     */
+    trackingArmies.forEach(function (army) {
+      self.armies.set(army.tile, army);
     });
 
     this.clean_up_armies();
@@ -1224,6 +1248,87 @@
     }
     army.update_tile(fogTargetTile);
     army.value = fogTargetTile.army - 1;
+    this.armies.set(fogTargetTile, army);
+    for (var i = 0; i < this.notify_army_moved.length; i++) this.notify_army_moved[i](army);
+  };
+
+  /*
+   * 地图告诉我们「这一格上的军队其实是往迷雾里走掉了」。把它塞回迷雾：
+   * 有两个候选迷雾格就当纠缠拆开，只有一个就整体推回去。不这么做的话，
+   * 留在可见格上的预测会被之后的 round 当成还在原地，造成幽灵军队。
+   */
+  P.try_split_fogged_army_back_into_fog = function (army, trackingArmies) {
+    var potential = [];
+    for (var i = 0; i < army.tile.movable.length; i++) {
+      var adj = army.tile.movable[i];
+      if (!adj.visible && !adj.isMountain && !adj.isUndiscoveredObstacle) potential.push(adj);
+    }
+
+    this.armies.delete(army.tile);
+    trackingArmies.delete(army.tile);
+
+    if (potential.length > 1) {
+      var entangledArmies = army.get_split_for_fog(potential);
+      for (var k = 0; k < potential.length; k++) {
+        this._push_fogged_army_guess_back_to_fog_tile(entangledArmies[k], potential[k], trackingArmies);
+      }
+    } else if (potential.length === 1) {
+      this._push_fogged_army_guess_back_to_fog_tile(army, potential[0], trackingArmies);
+    }
+  };
+
+  P._push_fogged_army_guess_back_to_fog_tile = function (army, fogTargetTile, trackingArmies) {
+    this.fog_back_push_touched_tiles_this_turn.add(fogTargetTile);
+
+    var existingArmy = this.armies.get(fogTargetTile);
+    if (existingArmy === undefined) existingArmy = null;
+    if (existingArmy !== null) {
+      if (existingArmy === army) {
+        existingArmy = null;
+      } else if (
+        army.entangledArmies.indexOf(existingArmy) >= 0 ||
+        existingArmy.entangledArmies.indexOf(army) >= 0
+      ) {
+        /* 目标格上的纠缠兄弟已经代表了这支军队，别合并出双倍兵力 */
+        existingArmy.last_moved_turn = this.map.turn - 1;
+        existingArmy.value = existingArmy.tile.army - 1;
+        this.scrap_army(army, false);
+        return;
+      } else {
+        this.scrap_army(army, false);
+        return;
+      }
+    }
+
+    var oldTile = army.tile;
+    this.armies.delete(oldTile);
+    trackingArmies.delete(oldTile);
+    this.unaccounted_tile_diffs.delete(oldTile);
+    this.unaccounted_tile_diffs.delete(fogTargetTile);
+
+    if (oldTile.visible) {
+      army.record_fog_tile_revert(oldTile);
+      /* 可见格的兵力是服务器事实，绝不回写 */
+    }
+
+    army.record_fog_tile_revert(fogTargetTile);
+    if (fogTargetTile.player() !== army.player && !fogTargetTile.discovered) {
+      fogTargetTile.isTempFogPrediction = true;
+    }
+    if (fogTargetTile.player() !== army.player && !fogTargetTile.isGeneral) {
+      var oldPlayer = pAt(this.map, fogTargetTile.player());
+      removeFromArray(oldPlayer.tiles, fogTargetTile);
+      if (this.map.players[army.player].tiles.indexOf(fogTargetTile) < 0) {
+        this.map.players[army.player].tiles.push(fogTargetTile);
+      }
+      fogTargetTile.setPlayer(army.player);
+    }
+
+    fogTargetTile.army = Math.max(1, army.value + 1);
+    army.update_tile(fogTargetTile);
+    army.value = fogTargetTile.army - 1;
+    army.last_moved_turn = this.map.turn - 1;
+    trackingArmies.set(fogTargetTile, army);
     this.armies.set(fogTargetTile, army);
     for (var i = 0; i < this.notify_army_moved.length; i++) this.notify_army_moved[i](army);
   };
@@ -3236,7 +3341,7 @@
     if (bypass2v2Partner === undefined) bypass2v2Partner = false;
 
     if (!bypass2v2Partner && this.map.is_2v2) {
-      var teammates = this.map.get_teammates_no_self(player);
+      var teammates = getTeammatesNoSelf(this.map, player);
       for (var i = 0; i < teammates.length; i++) {
         var teammate = teammates[i];
         if (!this.map.players[teammate].dead) {
@@ -4002,7 +4107,8 @@
     }
     if (pathToPotentialEnGeneral !== null && pathToPotentialEnGeneral !== undefined) {
       /* 这条禁令防止把 connectedDark 重复填充：可以路过，但不写回 */
-      var nearGenBan = new Set(bannedTiles);
+      /* bannedTiles 是 MapMatrixSet（平表，不是 iterable），必须先摊成数组 */
+      var nearGenBan = new Set(toArray(bannedTiles));
       connectedDark.forEach(function (t) {
         nearGenBan.add(t);
       });
@@ -4087,7 +4193,7 @@
     var beforeCount = tilesToConvertToAddTo.size;
     var connectedDarkList = toArray(connectedDark);
     var preseededConnectedDark = 0;
-    var skips = new Set(bannedTiles);
+    var skips = new Set(toArray(bannedTiles));
     for (var i = 0; i < connectedDarkList.length; i++) skips.delete(connectedDarkList[i]);
     for (var j = 0; j < connectedDarkList.length; j++) {
       var tile = connectedDarkList[j];
@@ -4306,7 +4412,8 @@
     var missingIncluded = new Set(requiredTiles);
     var costPer = new Map();
 
-    for (var i = 0; i < requiredTiles.length; i++) bannedSet.delete(requiredTiles[i]);
+    /* bannedSet 可能是 MapMatrixSet（Python 那边是 set），两种都支持 */
+    for (var i = 0; i < requiredTiles.length; i++) removeFromCollection(bannedSet, requiredTiles[i]);
 
     if (requiredTiles.length === 0) return [includedSet, missingIncluded];
 
@@ -4325,10 +4432,12 @@
       if (guard > 500) break;
       var path = S().breadth_first_find_queue(map, Array.from(usefulStartSet), findFunc, { skipTiles: bannedSet, noLog: true });
       if (path === null || path === undefined) {
-        var altBanned = new Set(bannedSet);
+        var altBanned = bannedSet.copy();
+        var mountains = [];
         map.reachable_tiles.forEach(function (t) {
-          if (t.isMountain) altBanned.add(t);
+          if (t.isMountain) mountains.push(t);
         });
+        altBanned.update(mountains);
         path = S().breadth_first_find_queue(map, Array.from(includedSet), findFunc, {
           skipTiles: altBanned,
           bypassDefaultSkipLogic: true,
