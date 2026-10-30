@@ -385,10 +385,22 @@ function playGame(seed, opponent, ourBudget, refBudget, oursSide, trace, engineC
             'T' + turn + ' 我方 地' + landCount(board, oursSide) + ' 兵' + armyCount(board, oursSide) +
             ' 将兵' + arm(board.generals[oursSide]) +
             ' 走' + (mv ? mv[0] + '→' + mv[1] + '(' + arm(mv[0]) + (board.owner[mv[1]] === oursSide ? '并' : board.owner[mv[1]] < 0 ? '占' : '打') + ')' : '空过') +
-            ' [' + Object.keys(GB.lastStats || {}).map((k) => k + '=' + GB.lastStats[k]).join(' ') + ']'
+            ' [' + Object.keys(GB.lastStats || {}).map((k) => k + '=' + GB.lastStats[k]).join(' ') + ']' +
+            (GB.dbg ? ' {focus=' + GB.dbg.focus + ' calls=' + (GB.dbg.calls || []).join(',') + ' why=' + (GB.lastReasons || []).join('|') + '}' : '')
           );
         }
         for (const m of moves) {
+          if (opts && opts.ourStats) {
+            const to = m[1];
+            const o = board.owner[to];
+            if (o === me) opts.ourStats.selfMoves++;
+            else {
+              opts.ourStats.captures++;
+              if (o >= 0) opts.ourStats.enemy++;
+              else if (o === -1) opts.ourStats.neutral++;
+              else opts.ourStats.fog++;
+            }
+          }
           applyMove(board, me, m[0], m[1], !!m[2]);
           if (board.owner[board.generals[enemy]] === me) {
             winner = me;

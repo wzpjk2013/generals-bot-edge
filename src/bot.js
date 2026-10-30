@@ -162,6 +162,7 @@
       S._focusDir = null;
       S._preferCity = false;
       S._genKnown = false;
+      S._blob = -1;
     }
     S._focusTurn = S.turn;
 
@@ -277,6 +278,10 @@
     // 沿路扩地的门槛：出兵格至少多少兵、目标格要留多少余量
     var frontGrowMin = C.frontGrowMin === undefined ? 6 : C.frontGrowMin | 0;
     var frontGrowMargin = C.frontGrowMargin === undefined ? 1 : C.frontGrowMargin | 0;
+    // 贴边空格目标粘住（见 pickFocus 末尾）
+    var stickyBlob = C.stickyBlob !== false;
+    // 守将判定按「还有几回合到」算（见 defendWarn）
+    var holdCheck = C.holdCheck !== false;
     /*
      * rail 排序默认还是「从厚到薄」，不是「从前沿往后倒灌」。
      *
@@ -1360,7 +1365,19 @@
        * 手边的空格——同样是 1 个兵换 1 格，而且主纵队不用掉头。
        */
       if (doBlob && best >= 0 && dist[best] > focusNear) {
-        var nearT = blobTarget(dist);
+        /*
+         * 近处那块填缝格要**粘住**（stickyBlob）。
+         *
+         * 不粘的时候每回合都会重挑一块「最便宜的贴边空格」，两块候选一左一右时
+         * 主纵队就在两格之间来回晃：回放 seed 16838 的 t=391..T401，244 个兵
+         * 在 103 和 83 之间一趟去一趟回，十回合一步地没多，而对面在同一段时间
+         * 里吃掉了我们 4 格地。粘住之后同一块吃到手才换下一块。
+         */
+        var nearT = stickyBlob ? S._blob : -1;
+        if (!(nearT >= 0 && nearT < n && owner[nearT] !== pid && dist[nearT] >= 0)) {
+          nearT = blobTarget(dist);
+          if (stickyBlob) S._blob = nearT;
+        }
         if (nearT >= 0) best = nearT;
       }
       S._focus = best;
@@ -1602,9 +1619,20 @@
       dist[myGeneral] = 0;
       var threatArmy = -1;
       var bestDelta = -Infinity;
+      /*
+       * 护卫：将军三步以内、我们自己最厚的那一堆。
+       *
+       * 不数它的话，这套预警会把主纵队往家里来回拽：把 238 个兵送到将军旁边那格
+       * （将军只剩 2 兵），下一回合「将军只有 2 兵、对面有 100 兵」就成立，于是
+       * 又把 238 个兵并回将军格；再下一回合将军又变成 2 兵……seed 16838 的
+       * T397..T401 就是这个两格来回，五回合一步地没多，对面在同一段时间吃了 3 格。
+       * 兵堆就在将军边上，本来就挡得住，不算「没人守」。
+       */
+      var guard = 0;
       for (var h = 0; h < queue.length; h++) {
         var cur = queue[h];
         if (dist[cur] >= 8) continue;
+        if (cur !== myGeneral && owner[cur] === pid && dist[cur] <= 3 && armies[cur] > guard) guard = armies[cur];
         if (cur !== myGeneral && owner[cur] >= 0 && owner[cur] !== pid) {
           // 用「到达时还剩多少兵」判断威胁，而不是当前兵数：敌人走过来要 dist
           // 回合，这期间将军也在涨 dist 兵。只有 armies - dist > ga + dist 才算
@@ -1625,7 +1653,49 @@
           queue.push(j);
         }
       }
-      if (threatArmy < 0 || bestDelta < armies[myGeneral]) return false;
+      DBG.guard = guard;
+      DBG.threatArmy = threatArmy;
+      /*
+       * 「守得住吗」：按**到达回合数**算，不按兵数比大小。
+       *
+       * Human.exe 的防守集兵也是这么算的：`searchTurns = threat.turns`、
+       * `armyAmount = threat.threatValue + 1`——先看对面还有几回合到我家门口，
+       * 再看这几回合里我能搬多少兵回来。原来只比 bestDelta（敌兵 − 2×距离）和将军
+       * 兵数，于是将军一薄就报警、把主纵队往家拽，下一回合又推出去（seed 16838
+       * T397..T401 两格来回五回合）。按回合算之后，「隔壁那堆 238 兵一步就能回来」
+       * 自然算是守得住，不用报警。
+       */
+      var tBest = -1;
+      var tTurns = 1 << 20;
+      if (!holdCheck) {
+        tTurns = 0;
+      }
+      for (i = 0; i < n && holdCheck; i++) {
+        if (dist[i] < 0 || dist[i] > 8) continue;
+        if (owner[i] < 0 || owner[i] === pid) continue;
+        if (armies[i] < 2) continue;
+        if (dist[i] < tTurns || (dist[i] === tTurns && tBest >= 0 && armies[i] > armies[tBest])) {
+          tTurns = dist[i];
+          tBest = i;
+        }
+      }
+      if (tBest >= 0) {
+        var reachable = [];
+        for (i = 0; i < n; i++) {
+          if (owner[i] !== pid || i === myGeneral || dist[i] < 1 || dist[i] >= tTurns) continue;
+          reachable.push(armies[i]);
+        }
+        reachable.sort(function (a, b) {
+          return b - a;
+        });
+        // 每回合只有一条命令：这几回合最多搬 tTurns 堆兵回来
+        var have = armies[myGeneral];
+        for (var rq = 0; rq < reachable.length && rq < tTurns; rq++) have += reachable[rq];
+        var need = armies[tBest] + 1;
+        DBG.hold = { turns: tTurns, need: need, have: have + tTurns };
+        if (have + tTurns >= need) return false;
+      }
+      if (threatArmy < 0 || bestDelta < armies[myGeneral] + (holdCheck ? guard : 0)) return false;
 
       var limit = budget;
       while (moves.length < limit) {
