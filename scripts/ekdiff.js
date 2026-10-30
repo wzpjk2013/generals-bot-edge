@@ -41,6 +41,7 @@ function main() {
   const keyStats = {};
   let turnsDone = 0;
   let firstBad = null;
+  let prevMove = null;
 
   for (const line of lines) {
     const rec = JSON.parse(line);
@@ -51,7 +52,22 @@ function main() {
     if (!map) {
       map = new EK.Map(startData, rec.data, { shuffle: false });
       map.apply_server_update(rec.data);
-    } else map.apply_server_update(rec.data);
+    } else {
+      // 原版是「上一回合决策时把 move 写进 map.last_player_index_submitted_move，
+      // 下一次 apply_server_update 时用它先消化掉自己的那一步」。不喂这一项，
+      // 自家移动会永远落在 unexplainedDelta 里，dFrom/dTo 全对不上。
+      if (prevMove) {
+        const src = map.get_tile_by_tile_index(prevMove[1] * map.cols + prevMove[0]);
+        const dest = map.get_tile_by_tile_index(prevMove[3] * map.cols + prevMove[2]);
+        map.last_player_index_submitted_move = [src, dest, !!prevMove[4]];
+      } else {
+        // 原版 find_move 每回合先无条件清空这一项，再在有招时写。留着上一回合的
+        // 旧招会让迷雾推断多消化掉一次自家移动，正是 T25 那个 -1 的来源。
+        map.last_player_index_submitted_move = null;
+      }
+      map.apply_server_update(rec.data);
+    }
+    prevMove = rec.move || null;
     turnsDone++;
 
     const py = rec.dump;
@@ -64,6 +80,11 @@ function main() {
       let bad = 0;
       const examples = [];
       for (let i = 0; i < n; i++) {
+        // 迷雾预测格上的 player/army 是 ArmyTracker 在决策期写进去的臆测值，
+        // 地图层不该替它背锅——只在看得见的格子上比较归属与兵数。
+        const fogPredOnly =
+          (key === 'player' || key === 'army' || key === 'dOldOwner' || key === 'dOldArmy') && !py.f.visible[i];
+        if (fogPredOnly) continue;
         // 地图级字段直接按 tile 顺序取
         const jsv = readJsField(map, key, i);
         if (jsv !== pyv[i]) {
