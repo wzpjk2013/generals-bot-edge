@@ -142,9 +142,12 @@
             bucket[neutralNewIndex] += 0.014;
           }
         } else {
-          // 未发现的格子记在评估格自己的玩家名下
+          // 未发现的格子投给**评估格自己**的玩家（不是这个格子的玩家）：
+          // 原版是 counts[ex][ey][evaluatingTile.player] += 0.25。
+          // 玩家为 -1 时 Python 的 [ -1 ] 命中中立票箱，JS 必须显式折回。
           if (!tile.discovered) {
-            bucket[tile.player()] += 0.25;
+            var evaluatingPlayer = evaluatingTile.player();
+            bucket[evaluatingPlayer === -1 ? neutralNewIndex : evaluatingPlayer] += 0.25;
           } else {
             var pIndex = tile.player();
             if (pIndex !== -1 && pIndex !== map.player_index) bucket[pIndex] += 1;
@@ -174,7 +177,15 @@
       return evaluatingTile.isMountain;
     }
 
+    // 顺序**必须**按 tile_index 升序：原版 startTiles = list(self.needToUpdateAroundTiles)
+    // 是 set 迭代，而 Tile.__hash__ 就是 tile_index（实测 hash(tile) == tile.tile_index），
+    // 所以 CPython 的 set 迭代出来的就是升序。scan 本身会边评估边往 territoryMap 里写
+    // 势力值，后面的格子会读前面的结果，顺序一变迷雾边的归属就跟着变（g5000 实测
+    // 换成插入顺序会有 524 格不一致，升序则 0 格）。
     var startTiles = Array.from(this.needToUpdateAroundTiles);
+    startTiles.sort(function (a, b) {
+      return a.tile_index - b.tile_index;
+    });
     S().breadth_first_foreach(map, startTiles, undiscoveredCounterDepth, foreach_near_updated_tiles);
     this.needToUpdateAroundTiles = new Set();
 
