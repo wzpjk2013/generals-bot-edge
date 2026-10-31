@@ -240,7 +240,11 @@
   function _call(bot, moduleName, fnName, args, dflt) {
     var mod = _resolve(moduleName);
     if (mod && typeof mod[fnName] === 'function') {
-      return mod[fnName].apply(mod, args);
+      // Python 里每个函数都显式 return None；JS 移植里有些分支没写 return，
+      // 得到的是 undefined，它会一路穿过 find_move 写进 history.move_history，
+      // 把重复出招检测搞崩。这里统一按原版语义折成声明的默认值。
+      var out = mod[fnName].apply(mod, args);
+      return out === undefined ? dflt : out;
     }
     noteMissing(moduleName + '.' + fnName);
     if (bot && bot.constructor && bot.constructor.strict) {
