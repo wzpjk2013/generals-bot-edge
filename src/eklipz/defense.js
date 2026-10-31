@@ -2217,15 +2217,25 @@
     var distLimit = 50;
     var sketchy = bot.sketchiest_potential_inbound_flank_path;
     if (sketchy && sketchy.tail && sketchy.tail.tile) {
-      distLimit = Math.max(2, _genDist(bot, sketchy.tail.tile) - 2);
+      // py:1774 没有下限 2，负数也照传（maxTurns 为负会让 max_gather 只剩最短连接）
+      distLimit = _genDist(bot, sketchy.tail.tile) - 2;
     } else {
       var ia = bot.board_analysis && bot.board_analysis.intergeneral_analysis;
       var spw = ia && ia.shortestPathWay;
       if (spw && spw.tiles) {
-        var spwTiles = EK.Gather.sortedByTileIndex(spw.tiles);
-        for (var i = 0; i < spwTiles.length; i++) {
-          if (!spwTiles[i].visible) { distLimit = _genDist(bot, spwTiles[i]); break; }
+        // py:1776-1778：取所有不可见格距离里的**最小**值，不是第一个（顺序无关）
+        var minDist = null;
+        var it = (spw.tiles instanceof Set) ? spw.tiles.values() : (spw.tiles || [])[Symbol.iterator]();
+        var cur = it.next();
+        while (!cur.done) {
+          var t = cur.value;
+          if (t && !t.visible) {
+            var d = _genDist(bot, t);
+            if (minDist === null || d < minDist) minDist = d;
+          }
+          cur = it.next();
         }
+        if (minDist !== null) distLimit = minDist;
       }
     }
 
@@ -2243,7 +2253,8 @@
       }
     }
 
-    var limit = use_cities_in_play_only ? 12 : 3;
+    // py:1802 `limit = 12 if not use_cities_in_play_only else 3`（原来这支反了）
+    var limit = use_cities_in_play_only ? 3 : 12;
     if (cities.length > limit) {
       var terr = _alias(bot, ['territories', 'territoryClassifier']);
       var tdist = terr && terr.territoryDistances && bot.targetPlayer !== undefined
@@ -2279,13 +2290,13 @@
       }
     }
 
-    var tree = EK.Gather.gath_set_quick(map, distLimit, includes, map.player_index, valueMatrix,
-      includes, negativeTiles, false, false, false, banned, null);
-    var out = new Set();
-    // gath_set_quick 在索引越界时可能吐出空位；下游把它当 Tile 用会直接崩，
-    // 所以在出口就把非 Tile 项滤掉。
-    if (tree) for (var ti = 0; ti < tree.length; ti++) if (tree[ti]) out.add(tree[ti]);
-    return out;
+    // py:1816-1825 → MapSpanningUtils.get_max_gather_spanning_tree_set_from_tile_lists。
+    // 原版这里不是 Gather.gath_set_quick：gath_set_quick 返回 GatherCapturePlan，
+    // 早先按 Tile 数组取用，空计划时 .length 为 0，防守树永远空。
+    var spanRes = EK.MapSpanning.get_max_gather_spanning_tree_set_from_tile_lists(
+      map, includes, banned, general.player(), valueMatrix,
+      { negativeTiles: negativeTiles, maxTurns: distLimit, require_min_distance: require_min_distance });
+    return new Set(spanRes[0]);
   };
 
   /*

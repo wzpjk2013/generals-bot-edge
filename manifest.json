@@ -35,6 +35,8 @@
         "src/eklipz/opponenttracker.js",
         "src/eklipz/tileisland.js",
         "src/eklipz/gather.js",
+        "src/eklipz/mapspanning.js",
+        "src/eklipz/watchman.js",
         "src/eklipz/expandutils.js",
         "src/eklipz/earlyexpandutils.js",
         "src/eklipz/timings.js",

@@ -30,7 +30,7 @@ const MODULES = [
   'pyrandom',
   'tile', 'mapmatrix', 'search', 'path', 'map', 'mapmove', 'nx',
   'armyanalyzer', 'territory', 'board', 'danger', 'city',
-  'armytracker', 'opponenttracker', 'tileisland', 'gather',
+  'armytracker', 'opponenttracker', 'tileisland', 'gather', 'mapspanning', 'watchman',
   'expandutils', 'earlyexpandutils', 'expansionops', 'combatops', 'gatherops',
   'targeting', 'interceptor', 'defense', 'centraldefense', 'pathing', 'repetition', 'statequeries',
   'timings', 'killtiming', 'cityops', 'wincondition', 'comms', 'rendering',
