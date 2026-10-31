@@ -108,12 +108,24 @@
     };
   }
 
+  /* 从异常栈里挑出第一帧 eklipz 的源码位置：真机报错只给一行 message，看不出是哪一行。 */
+  function firstEkFrame(stack) {
+    if (!stack) return '';
+    var lines = String(stack).split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      var m = /eklipz\/[A-Za-z0-9_.-]+\.js:\d+:\d+/.exec(lines[i]);
+      if (m) return m[0];
+    }
+    return (lines[1] || '').trim().slice(0, 80);
+  }
+
   function EkEngine() {
     this.map = null;
     this.bot = null;
     this.started = false;
     this.errors = 0;
     this.lastError = '';
+    this.lastStack = '';
     this.lastMoveMs = 0;
     this.turns = 0;
   }
@@ -123,6 +135,7 @@
     this.bot = null;
     this.started = false;
     this.lastError = '';
+    this.lastStack = '';
     this.lastMoveMs = 0;
     this.turns = 0;
   };
@@ -170,6 +183,11 @@
     } catch (e) {
       this.errors += 1;
       this.lastError = 'move: ' + ((e && e.message) || e);
+      this.lastStack = (e && e.stack) || '';
+      // 只在第一次打印整条栈：真机面板放不下栈，控制台里留一份给用户复制。
+      if (this.errors === 1 && root.console && root.console.error) {
+        root.console.error('[GBAuto] ek 引擎异常（T' + this.map.turn + '）', e);
+      }
       move = null;
     }
     var t1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
@@ -187,6 +205,7 @@
       started: this.started,
       errors: this.errors,
       lastError: this.lastError,
+      lastFrame: firstEkFrame(this.lastStack),
       ms: this.lastMoveMs,
       turns: this.turns,
       missing: (root.__EK && root.__EK.Bot && root.__EK.Bot.missingReport) ? root.__EK.Bot.missingReport() : {}

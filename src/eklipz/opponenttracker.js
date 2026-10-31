@@ -492,6 +492,16 @@
 
   /* ============================ OpponentTracker ============================ */
 
+  /* Python 的 list[-1] 取末元素，JS 直接下标得 undefined。
+   * 原版好几处按 bot.targetPlayer（可能是 -1，表示还没选定目标）索引这几个
+   * by-player 数组，移植时必须保留负索引语义，否则 FFA 里每回合抛异常。 */
+  function pyIdx(arr, i) {
+    if (!arr || arr.length === 0) return undefined;
+    if (i >= 0) return arr[i];
+    var k = arr.length + i;
+    return arr[k >= 0 ? k : arr.length - 1];
+  }
+
   function OpponentTracker(map, viewInfo) {
     this.outbound_emergence_notifications = [];
     this.map = map;
@@ -751,6 +761,11 @@
       this.team_cycle_stats_history[team][this.map.turn] = currentCycleStats;
       for (var ei = 0; ei < currentCycleStats.players.length; ei++) {
         var player = currentCycleStats.players[ei];
+        // 按需建表：py 初始化时 [{} for p in players]，但 FFA 里可能遇到
+        // 还没进过这个数组的玩家号，缺了就会在下面 history[turn] 处抛。
+        if (!this.largest_unresolved_emergence_history_by_player[player]) {
+          this.largest_unresolved_emergence_history_by_player[player] = {};
+        }
         var emergenceData = this.current_largest_unresolved_emergence_by_player[player];
         if (emergenceData !== null && emergenceData !== undefined) {
           this.largest_unresolved_emergence_history_by_player[player][this.map.turn] = emergenceData;
@@ -1203,14 +1218,14 @@
   OT.get_last_attacked_from_locations = function (forPlayer, lastNRounds) {
     if (lastNRounds === undefined) lastNRounds = 1;
     var ret = [];
-    var currentEmergence = this.current_largest_unresolved_emergence_by_player[forPlayer];
+    var currentEmergence = pyIdx(this.current_largest_unresolved_emergence_by_player, forPlayer);
     if (currentEmergence === null || currentEmergence === undefined) {
       ret.push(null);
     } else {
       ret.push([currentEmergence.amount, currentEmergence.tile]);
     }
 
-    var history = this.largest_unresolved_emergence_history_by_player[forPlayer];
+    var history = pyIdx(this.largest_unresolved_emergence_history_by_player, forPlayer) || {};
     for (var cyclesToGoBack = 0; cyclesToGoBack < lastNRounds - 1; cyclesToGoBack++) {
       var cycleTurn = this.get_last_cycle_end_turn_raw(cyclesToGoBack);
       if (cycleTurn === null) {

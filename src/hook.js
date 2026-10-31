@@ -137,7 +137,9 @@
     // 这一步一旦出错就改让自制引擎出招，至少还在下棋，同时把原因写进面板。
     if (ek && ek.stats && ek.stats().errors > ekErrBefore) {
       var ekst = ek.stats();
-      stats.ekErr = (ekst.lastError || '未知错误') + '（第 ' + ekst.errors + ' 次）';
+      stats.ekErr = (ekst.lastError || '未知错误') +
+        (ekst.lastFrame ? ' @ ' + ekst.lastFrame : '') +
+        '（第 ' + ekst.errors + ' 次）';
       try {
         moves = GB.bot.plan(S, settings);
         if (moves && moves.length) stats.ekFallback = (stats.ekFallback || 0) + 1;
@@ -672,7 +674,8 @@
       if (stats.ekErr) tip += ' / ek 引擎报错：' + stats.ekErr;
       if (GB.ekbot && GB.ekbot.stats) {
         var ekst = GB.ekbot.stats();
-        tip += ' / ek 错误数 ' + ekst.errors + (ekst.lastError ? '（' + ekst.lastError + '）' : '');
+        tip += ' / ek 错误数 ' + ekst.errors +
+          (ekst.lastError ? '（' + ekst.lastError + (ekst.lastFrame ? ' @ ' + ekst.lastFrame : '') + '）' : '');
         if (stats.ekFallback) tip += ' / 回落自制引擎 ' + stats.ekFallback + ' 次';
       }
       if (stats.passRun) tip += ' / 连续空过 ' + stats.passRun;

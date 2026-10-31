@@ -83,7 +83,15 @@
 
     // call: (bot, source, distMap, skipTiles, timeLimit, cramped|pruneCutoff)
     optimize_first_25: function (bot, source, distMap, skipTiles, timeLimit, last) {
-      var cutoffTime = timeLimit === undefined || timeLimit === null ? null : timeLimit;
+      // 调用点传的是「时长」（py: cutoff = perf_counter() + timeLimit 在 py 里自己算），
+      // 而 EarlyExpandUtils 收的是「截止时刻」（内部做 cutoff - now()）。这里必须换算成
+      // 绝对时刻，否则传 4.0 会被当成 1970 年的死线，搜索立刻超时返回空计划。
+      var cutoffTime = null;
+      if (timeLimit !== undefined && timeLimit !== null) {
+        var nowFn = EK.EarlyExpandUtils && EK.EarlyExpandUtils._now_seconds;
+        var now = typeof nowFn === 'function' ? nowFn() : Date.now() / 1000;
+        cutoffTime = now + timeLimit;
+      }
       var pruneCutoff = -1;
       var cramped = false;
       var shuffleLaunches = false;

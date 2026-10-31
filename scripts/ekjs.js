@@ -225,6 +225,8 @@ function playGameEk(seed, opponent, ekSide, opts) {
       if (p === ekSide) {
         const st = serialize(board, p, fogs[p], vis);
         const mv = ek.turn(updatePacket(board, turn + 1, st));
+        // 探针钩子：出招前的板上真实状态 + 引擎内部计划，用于定位非法招来源
+        if (opts.onTurn) opts.onTurn(turn, board, p, mv, ek);
         if (mv) {
           const okMove = A.applyMove(board, p, mv[0], mv[1], mv[2]);
           if (!okMove) illegal.push([turn, mv, illegalReason(board, p, mv)]);

@@ -35,6 +35,25 @@
     return out;
   };
 
+  /* Python 的 list[-1] 取末元素。移植里大量 self.map.players[x] 的 x 可能为 -1，
+   * 直接下标会得到 undefined 并在下一步读取属性时抛异常。
+   * 只拦负整数下标，其余（length / 方法 / 正下标）原样走。 */
+  function negativeIndexArray(arr) {
+    if (typeof Proxy !== 'function') return arr;
+    return new Proxy(arr, {
+      get: function (target, prop, recv) {
+        if (typeof prop === 'string' && prop.length > 1 && prop.charAt(0) === '-') {
+          var n = Number(prop);
+          if (!isNaN(n) && n < 0) {
+            var k = target.length + n;
+            return target[k >= 0 ? k : target.length - 1];
+          }
+        }
+        return Reflect.get(target, prop, recv);
+      }
+    });
+  }
+
   function Player(index) {
     this.cities = [];
     this.general = null;
@@ -223,6 +242,11 @@
     this.usernames = usernames;
     this.players = [];
     for (var pi = 0; pi < usernames.length; pi++) this.players.push(new Player(pi));
+    // 原版到处写 self.map.players[targetPlayer]，而 targetPlayer 在还没选定目标时
+    // 是 -1；Python 的 list[-1] 取末元素，JS 直接下标得 undefined，
+    // 于是 FFA（玩家号到 4）里一路抛 undefined 的属性读取。
+    // 这里给数组套一层只处理负下标的代理，等价于 Python 的负索引语义。
+    this.players = negativeIndexArray(this.players);
     this.unique_teams = this.players.map(function (p) {
       return p.index;
     });
@@ -381,8 +405,14 @@
   P.get_all_tiles = function () {
     return this.tiles_by_index;
   };
+  /* 原版是 self._teammates_by_player[player]，Python 里传 -1（中立/无目标）会取到最后一项，
+   * 也就是那条挂了 -1 的伪队伍数组；JS 直接下标会拿到 undefined，调用方再 .indexOf 就炸。 */
   P.get_teammates = function (p) {
-    return this._teammates_by_player[p];
+    var arr = this._teammates_by_player;
+    if (!arr || arr.length === 0) return [];
+    if (p >= 0 && p < arr.length) return arr[p];
+    var last = arr[arr.length - 1];
+    return last || [];
   };
   P.is_player_friendly = function (player) {
     return this.team_ids_by_player_index[player] === this.friendly_team;
