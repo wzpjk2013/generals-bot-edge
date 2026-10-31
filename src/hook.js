@@ -50,7 +50,10 @@
     snd: 0,       // 成功 emit 出去的条数
     miss: 0,      // 下发了但服务器没吃（下一帧看不到效果）
     gap: 0,       // 漏掉的帧：服务器 turn 跳号，增量基线会因此对不上
-    pid: -1       // 服务器告诉我们的玩家下标
+    pid: -1,      // 服务器告诉我们的玩家下标
+    ekErr: '',    // ek 引擎最近一次报错（被 ekrun 吞掉了，得我们从 errors 计数里看出来）
+    ekFallback: 0, // ek 崩了之后改由自制引擎出招的次数
+    passRun: 0    // ek 连续空过多少次（开局搜索超时会这样，连着空过就交回自制引擎）
   };
   var lastDrive = { turn: -1, at: 0 };
   // 上一手下发的记录，用来核对服务器吃没吃
@@ -118,16 +121,60 @@
     verifyPending();
 
     var moves;
+    // ek 引擎 = EklipZ（Human.exe）逐行移植版，src/ekrun.js 里做协议适配；
+    // 老的自制引擎保留为回退，settings.engine = 'gb' 时用它。
+    var engine = (settings.engine === 'gb') ? GB.bot : (GB.ekbot || GB.bot);
+    var ek = (engine === GB.ekbot) ? GB.ekbot : null;
+    var ekErrBefore = ek && ek.stats ? ek.stats().errors : 0;
     try {
-      // ek 引擎 = EklipZ（Human.exe）逐行移植版，src/ekrun.js 里做协议适配；
-      // 老的自制引擎保留为回退，settings.engine = 'gb' 时用它。
-      var engine = (settings.engine === 'gb') ? GB.bot : (GB.ekbot || GB.bot);
       moves = engine.plan(S, settings);
     } catch (e) {
       stats.error = String((e && e.message) || e);
       log('plan failed', e);
       return;
     }
+    // ekrun 把引擎异常吞成空招（不然一次崩溃就整局停摆），代价是面板只剩「决策 0」。
+    // 这一步一旦出错就改让自制引擎出招，至少还在下棋，同时把原因写进面板。
+    if (ek && ek.stats && ek.stats().errors > ekErrBefore) {
+      var ekst = ek.stats();
+      stats.ekErr = (ekst.lastError || '未知错误') + '（第 ' + ekst.errors + ' 次）';
+      try {
+        moves = GB.bot.plan(S, settings);
+        if (moves && moves.length) stats.ekFallback = (stats.ekFallback || 0) + 1;
+      } catch (e2) {
+        stats.error = 'gb 回退也失败: ' + ((e2 && e2.message) || e2);
+        log('gb fallback failed', e2);
+      }
+    } else if (ek) {
+      stats.ekErr = '';
+    }
+
+    /*
+     * 开局空过兜底。
+     *
+     * 原版前 25 回合走 make_first_25_move，那套搜索是按时间片截断的：算不完就
+     * 返回空计划，于是整回合不出招（原版 Python 自己也会在 T29~T48 连续空过）。
+     * 移植版在真机慢一档，前半分钟可能就是一次都不动——面板上正是「决策 0、下发 0」。
+     * 连续空过到一定次数就交回自制引擎，保证开局一定在长地。
+     */
+    if (ek && (!moves || !moves.length)) {
+      stats.passRun = (stats.passRun || 0) + 1;
+      if (stats.passRun >= 6 && S.turn <= 120) {
+        try {
+          var gbMoves = GB.bot.plan(S, settings);
+          if (gbMoves && gbMoves.length) {
+            moves = gbMoves;
+            stats.ekFallback = (stats.ekFallback || 0) + 1;
+            stats.passRun = 0;
+          }
+        } catch (e3) {
+          log('early fallback failed', e3);
+        }
+      }
+    } else {
+      stats.passRun = 0;
+    }
+
     if (moves && moves.length) stats.dec += 1;
     if (!moves.length || !socketRef) return;
 
@@ -201,8 +248,15 @@
   // 用 turn 去重会漏掉同一 tick 的两条更新，按名字去重会把 tick 吃掉。
   var lastPayload = null;
 
+  // socket.io 客户端内部把事件名映射成带 $ 前缀的名字（官方 bundle 的 _callbacks 里
+  // 全是 $game_start / $game_update），我们的 handlers 用的是裸名，所以进出都归一化一次。
+  function plainName(name) {
+    var s = String(name || '');
+    return s.charAt(0) === '$' ? s.slice(1) : s;
+  }
+
   function feed(name, payload) {
-    var h = handlers[name];
+    var h = handlers[plainName(name)];
     if (!h) return false;
     if (payload && payload === lastPayload) return true;
     lastPayload = payload;
@@ -221,21 +275,23 @@
    * 官方注册的回调拿到的是**它自己解码后的 payload**，所以只要挂在它的订阅上，
    * 不管名字怎么变都能拿到数据。
    */
+  // 事件名可能带 $ 前缀（见 plainName）：官方注册的是 $game_start，我们订阅的是裸名。
   function tapOn(sock) {
     if (sock.__gbTapped) return;
     var rawOn = sock.on;
     if (typeof rawOn !== 'function') return;
     try {
       sock.on = function (name, fn) {
-        if (typeof fn !== 'function' || !handlers[name]) return rawOn.apply(this, arguments);
+        var key = plainName(name);
+        if (typeof fn !== 'function' || !handlers[key]) return rawOn.apply(this, arguments);
         var self = this;
         return rawOn.call(self, name, function (payload) {
           // 官方回调必须照常执行——它负责把地图写进 redux、重画棋盘，
           // 少一次屏幕就停住。我们只是先插一脚，不能顶掉它。
           try {
-            feed(name, payload);
+            feed(key, payload);
           } catch (e) {
-            log('tap failed: ' + name, e);
+            log('tap failed: ' + key, e);
           }
           return fn.apply(self, arguments);
         });
@@ -243,6 +299,34 @@
       sock.__gbTapped = true;
     } catch (e) {
       log('tapOn failed', e);
+    }
+  }
+
+  /*
+   * 线上兜底：直接包 socket.onevent。
+   *
+   * 前面两条路都依赖「事件叫什么名字」，而名字是官方自己压的（客户端内部确实出现过
+   * $ 前缀）。onevent 拿到的是解码后的原始包，名字与 payload 都在里面，跟订阅无关。
+   * 真机上曾经出现「事件一直是 0、面板一动不动」，这条兜底就是为那种情况准备的。
+   */
+  function tapWire(sock) {
+    if (sock.__gbWired) return;
+    var rawOnevent = sock.onevent;
+    if (typeof rawOnevent !== 'function') return;
+    try {
+      sock.onevent = function (packet) {
+        try {
+          var data = (packet && packet.data) || [];
+          var name = plainName(data[0]);
+          if (handlers[name]) feed(name, data[1]);
+        } catch (e) {
+          log('wire tap failed', e);
+        }
+        return rawOnevent.apply(this, arguments);
+      };
+      sock.__gbWired = true;
+    } catch (e) {
+      log('tapWire failed', e);
     }
   }
 
@@ -254,15 +338,19 @@
     log('socket attached');
 
     Object.keys(handlers).forEach(function (name) {
-      try {
-        sock.on(name, function (payload) {
-          feed(name, payload);
-        });
-      } catch (e) {
-        log('subscribe failed: ' + name, e);
-      }
+      // 裸名和 $ 前缀各订一次：官方 bundle 用的是 $name，线上包用的是裸名。
+      [name, '$' + name].forEach(function (evName) {
+        try {
+          sock.on(evName, function (payload) {
+            feed(name, payload);
+          });
+        } catch (e) {
+          log('subscribe failed: ' + evName, e);
+        }
+      });
     });
     tapOn(sock);
+    tapWire(sock);
   }
 
   try {
@@ -579,8 +667,18 @@
         '；已收 ' + stats.ev + ' 个事件，最近 ' + stats.lastEv +
         '；玩家下标 ' + (S.playerIndex >= 0 ? S.playerIndex : '-');
 
-      ui.st.textContent = stats.error || status;
-      ui.st.className = 'v ' + (stats.error ? 'err' : cls);
+      // ek 引擎内部把异常吞成空招（ekrun.plan 里 catch 后 return []），不在这里
+      // 透出来，面板上就只剩「决策 0」，根本看不出是自己崩了还是这回合确实不该动。
+      if (stats.ekErr) tip += ' / ek 引擎报错：' + stats.ekErr;
+      if (GB.ekbot && GB.ekbot.stats) {
+        var ekst = GB.ekbot.stats();
+        tip += ' / ek 错误数 ' + ekst.errors + (ekst.lastError ? '（' + ekst.lastError + '）' : '');
+        if (stats.ekFallback) tip += ' / 回落自制引擎 ' + stats.ekFallback + ' 次';
+      }
+      if (stats.passRun) tip += ' / 连续空过 ' + stats.passRun;
+
+      ui.st.textContent = stats.error || stats.ekErr || status;
+      ui.st.className = 'v ' + (stats.error || stats.ekErr ? 'err' : cls);
       ui.st.title = tip + (stats.error ? ' / 错误：' + stats.error : '');
 
       if (!S.ready) {
