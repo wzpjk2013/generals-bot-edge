@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Generals AutoPilot",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "description": "generals.io 自动决策与自动移动：EklipZ（Human.exe）引擎逐行移植，解析对局状态、跑决策、通过官方 socket 下发 attack。",
   "minimum_chrome_version": "111",
   "permissions": [
