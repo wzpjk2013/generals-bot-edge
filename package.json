@@ -1,6 +1,6 @@
 {
   "name": "generals-autopilot-edge",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "private": true,
   "description": "generals.io 自动决策/自动移动的 Edge 扩展",
   "scripts": {
