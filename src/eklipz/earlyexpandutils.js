@@ -36,6 +36,45 @@
 
   var EMPTY_COMBINATION = [0, 0, 0, 0];
 
+  /* GB_F25_DEBUG=1 时把候选枚举与最终结果打到 stderr：字段名和顺序与 Python 侧
+   * EarlyExpandUtils._f25_emit 一致，方便逐行肉眼 diff；GB_F25_TURN 可只挑几回合。 */
+  var F25_DEBUG = !!(typeof process !== 'undefined' && process.env && process.env.GB_F25_DEBUG === '1');
+  var F25_NO_CUTOFF = !!(typeof process !== 'undefined' && process.env && process.env.GB_F25_NO_CUTOFF === '1');
+  var F25_USE_CUTOFF = !!(typeof process !== 'undefined' && process.env && process.env.GB_F25_USE_CUTOFF === '1');
+  var F25_TURNS = null;
+  if (F25_DEBUG && process.env.GB_F25_TURN) {
+    F25_TURNS = {};
+    var f25TurnParts = String(process.env.GB_F25_TURN).split(',');
+    for (var f25ti = 0; f25ti < f25TurnParts.length; f25ti++) {
+      var f25tv = parseInt(f25TurnParts[f25ti], 10);
+      if (!isNaN(f25tv)) F25_TURNS[f25tv] = 1;
+    }
+  }
+  function f25Enabled(turn) {
+    return F25_DEBUG && (F25_TURNS === null || F25_TURNS[turn] === 1);
+  }
+  function f25Emit(rec) {
+    process.stderr.write('F25JS ' + JSON.stringify(rec) + '\n');
+  }
+  function f25PathLens(paths) {
+    if (!paths) return [];
+    var out = [];
+    for (var i = 0; i < paths.length; i++) {
+      out.push(paths[i] === null || paths[i] === undefined ? null : paths[i].length);
+    }
+    return out;
+  }
+  function f25PathStarts(paths) {
+    if (!paths) return [];
+    var out = [];
+    for (var i = 0; i < paths.length; i++) {
+      var p = paths[i];
+      if (p === null || p === undefined) { out.push(null); continue; }
+      out.push([p.start.x, p.start.y]);
+    }
+    return out;
+  }
+
   /* ==================================================================
    * 小工具
    * ================================================================== */
@@ -478,6 +517,15 @@
         // 先跑一条「零浪费」的基线当底，避免后面所有候选都不如它
         var launchResult = _sub_optimize_remaining_cycle_expand_from_cities(map, general, general.army, distToGenMap, tileMinimizationMaps, map.turn, -20, maxTiles, null, alreadyOwned, skipTiles, false, false, debugViewInfo, false, false, 0, noLog);
         var launchVal = evaluatePlanValue(map, general, genArmyAtStart, map.turn, launchResult, distToGenMap, evaluationTileMinimizationMap, alreadyOwned, -1, noLog);
+        if (f25Enabled(mapTurnAtStart)) {
+          f25Emit({
+            ev: 'baseline',
+            turn: mapTurnAtStart,
+            genArmy: general.army,
+            launchVal: launchVal.slice(),
+            pathLens: f25PathLens(launchResult),
+          });
+        }
         maxVal = launchVal;
         maxResultPaths = launchResult;
         maxTiles = launchVal[0];
@@ -522,6 +570,16 @@
 
     // 已经拥有多格（兵力充足 / 中期）时改用「非预先编排」的浪费步数
     if (alreadyOwned.size > 1) {
+      if (f25Enabled(mapTurnAtStart)) {
+        f25Emit({
+          ev: 'branch',
+          turn: mapTurnAtStart,
+          branch: 'optimize_city_expand',
+          genArmyAtStart: genArmyAtStart,
+          alreadyOwnedSize: alreadyOwned.size,
+          pruneCutoff: pruneCutoff,
+        });
+      }
       return optimize_city_expand(alreadyOwned, cutoffTime, debugViewInfo, distToGenMap, genArmyAtStart, general, map, mapTurnAtStart, noLog, pruneCutoff, shuffleLaunches, skipTiles, tileMinimizationMaps);
     }
 
@@ -550,6 +608,11 @@
           ? startTime + timeLimit
           : startTime + (timeLimit / combinationsWithMaxOptimal.length) * i;
       }
+      // 默认不给预算：原版的 wall-clock 时间片会让同一 seed 在不同机器/负载下
+      // 得到不同的方案（实测 python 侧开调试日志都会变），移植版必须可复现。
+      // GB_F25_USE_CUTOFF=1 时才复刻原版 3.0s 时间片，用于跟原版快照对拍。
+      if (F25_NO_CUTOFF) perCutoff = Infinity;
+      else if (!F25_USE_CUTOFF) perCutoff = Infinity;
 
       if (mapTurnAtStart > launchTurn) continue;
 
@@ -575,6 +638,19 @@
       );
       for (var w = mapTurnAtStart; w < launchTurn; w++) launchResult2.unshift(null);
       var launchVal2 = evaluatePlanValue(map, general, genArmyAtStart, map.turn, launchResult2, distToGenMap, evaluationTileMinimizationMap, alreadyOwned, -1, noLog);
+      if (f25Enabled(mapTurnAtStart)) {
+        f25Emit({
+          ev: 'candidate',
+          turn: mapTurnAtStart,
+          genArmy: genArmy,
+          optimalWastedMoves: optimalWastedMoves,
+          launchTurn: launchTurn,
+          launchVal: launchVal2.slice(),
+          pathLens: f25PathLens(launchResult2),
+          pathStarts: f25PathStarts(launchResult2),
+          maxBefore: maxVal === null ? null : maxVal.slice(),
+        });
+      }
       if (maxVal === null || cmpTuple(launchVal2, maxVal) > 0) {
         maxVal = launchVal2;
         maxResultPaths = launchResult2;
@@ -604,6 +680,21 @@
     var val = get_start_expand_captures(map, general, general.army, mapTurnAtStart, maxResultPaths, alreadyOwned, -1, false);
     if (val !== maxTiles) {
       throw new Error('maxTiles ' + maxTiles + ' did not match expand val ' + val);
+    }
+
+    if (f25Enabled(mapTurnAtStart)) {
+      f25Emit({
+        ev: 'result',
+        turn: mapTurnAtStart,
+        branch: 'first_25',
+        genArmyAtStart: genArmyAtStart,
+        alreadyOwnedSize: alreadyOwned.size,
+        maxVal: maxVal === null ? null : maxVal.slice(),
+        maxTiles: maxTiles,
+        launchTurn: launchTurnOut,
+        pathLens: f25PathLens(maxResultPaths),
+        pathStarts: f25PathStarts(maxResultPaths),
+      });
     }
 
     return new CityExpansionPlan(maxTiles, maxResultPaths, launchTurnOut, general);
@@ -646,6 +737,21 @@
       noLog
     );
     var val = get_start_expand_captures(map, general, genArmyAtStart, turnInCycle, result, alreadyOwned, -1, false);
+    if (f25Enabled(mapTurnAtStart)) {
+      f25Emit({
+        ev: 'result',
+        turn: mapTurnAtStart,
+        branch: 'city_expand',
+        genArmyAtStart: genArmyAtStart,
+        alreadyOwnedSize: alreadyOwned.size,
+        turnInCycle: turnInCycle,
+        allowWasted: allowWasted,
+        val: val,
+        launchTurn: mapTurnAtStart,
+        pathLens: f25PathLens(result),
+        pathStarts: f25PathStarts(result),
+      });
+    }
     return new CityExpansionPlan(val, result, mapTurnAtStart, general);
   }
 
@@ -763,9 +869,18 @@
       }
     }
 
-    if (maxValue[0] === 0) return [maxValue, [null]];
+    if (maxValue[0] === 0) {
+      if (f25Enabled(map.turn)) {
+        f25Emit({ ev: 'seg', turn: map.turn, segTurn: curTurn, genArmy: curAttemptGenArmy, forceWasted: forceWastedMoves, value: maxValue.slice(), zerothrowing: true, pathLens: [] });
+      }
+      return [maxValue, [null]];
+    }
 
     for (var mi = 0; mi < maxOptimized.length; mi++) pathList.push(maxOptimized[mi]);
+
+    if (f25Enabled(map.turn)) {
+      f25Emit({ ev: 'seg', turn: map.turn, segTurn: curTurn, genArmy: curAttemptGenArmy, forceWasted: forceWastedMoves, value: maxValue.slice(), zerothrowing: false, pathLens: f25PathLens(pathList) });
+    }
 
     return [maxValue, pathList];
   }
@@ -855,7 +970,12 @@
       forced.push(forceWasted0);
     }
 
-    if (forced.length === 0) return maxCombinationPathList;
+    if (forced.length === 0) {
+      if (f25Enabled(map.turn)) {
+        f25Emit({ ev: 'forcedcount', turn: map.turn, segTurn: turn, genArmy: genArmy, count: 0, visitLen: visitedSet.size, turnsLeft: turnsLeft, pruneBelow: pruneBelow });
+      }
+      return maxCombinationPathList;
+    }
 
     if (shuffleLaunches) shuffleInPlace(forced);
 
@@ -880,9 +1000,19 @@
     for (var ii = 0; ii < forced.length; ii++) {
       var forceWastedMoves = forced[ii];
       var bestCaseResult = visitedSet.size + turnsLeft - forceWastedMoves;
-      if (bestCaseResult < pruneBelow) continue;
+      if (bestCaseResult < pruneBelow) {
+        if (f25Enabled(map.turn)) {
+          f25Emit({ ev: 'forced', turn: map.turn, segTurn: turn, genArmy: genArmy, forceWasted: forceWastedMoves, state: 'prune', bestCase: bestCaseResult, pruneBelow: pruneBelow });
+        }
+        continue;
+      }
 
-      if (pastCutoff(cutoffTime)) break;
+      if (pastCutoff(cutoffTime)) {
+        if (f25Enabled(map.turn)) {
+          f25Emit({ ev: 'forced', turn: map.turn, segTurn: turn, genArmy: genArmy, forceWasted: forceWastedMoves, state: 'cutoff' });
+        }
+        break;
+      }
 
       var newCutoff = minCutoff(cutoffTime, nextStart + timeEach);
       timeEach = Math.max(minTimeEach, timeEach - reduc);
@@ -890,6 +1020,20 @@
       var res = _sub_optimize_first_25_specific_wasted(map, general, genArmy, distToGenMap, tileWeightMaps, turn, forceWastedMoves, allowWastedMoves, pruneBelow, visitedSet, newCutoff, null, skipTiles, shuffleLaunches, dontForceFirst, debugViewInfo, addlLevelsRandSkips, segmentIndex, noLog);
       var value = res[0];
       var pathList = res[1];
+
+      if (f25Enabled(map.turn)) {
+        f25Emit({
+          ev: 'forced',
+          turn: map.turn,
+          segTurn: turn,
+          genArmy: genArmy,
+          forceWasted: forceWastedMoves,
+          state: 'value',
+          value: value.slice(),
+          maxBefore: maxCombinationValue.slice(),
+          pathLens: f25PathLens(pathList),
+        });
+      }
 
       if (cmpTuple(value, maxCombinationValue) > 0) {
         maxCombinationValue = value;
@@ -1143,7 +1287,7 @@
     var startVals = new Map();
     startVals.set(general, [[0, 0, -1000, 0, 0, 0, 0, 0, genArmy, forceWastedMoves], 0]);
 
-    return bfsDynamicMaxIncludePath(map, startVals, valueFunc, {
+    var segPath = bfsDynamicMaxIncludePath(map, startVals, valueFunc, {
       priorityFunc: prioFunc,
       skipFunc: skipFunc,
       maxTurns: turnsLeft,
@@ -1152,6 +1296,20 @@
       searchingPlayer: searchingPlayer,
       includePath: true,
     });
+
+    if (f25Enabled(map.turn)) {
+      f25Emit({
+        ev: 'segsearch',
+        turn: map.turn,
+        turnsLeft: turnsLeft,
+        genArmy: genArmy,
+        forceWasted: forceWastedMoves,
+        pathLen: segPath === null || segPath === undefined ? null : segPath.length,
+        pathStart: segPath === null || segPath === undefined ? null : [segPath.start.x, segPath.start.y],
+      });
+    }
+
+    return segPath;
   }
 
   /* ==================================================================
