@@ -38,7 +38,7 @@ const MODULES = [
   'explorationops',
   // 迭代流扩张：models 先于求解器，flowgraph 提供有向图与 A/BC，flowmincost 是
   // 原版默认的 OrToolsSimpleMinCost 实现，flowknapsack 供 flowexpansion 装箱
-  'flowmodels', 'flowgraph', 'flowmincost', 'flowknapsack', 'flowexpansion',
+  'flowmodels', 'flowgraph', 'flowmincost', 'flowknapsack', 'flowexpansion', 'iterativeexpansion',
   'expandhooks', 'botmain'
 ];
 

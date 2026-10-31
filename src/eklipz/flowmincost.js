@@ -11,6 +11,10 @@
  * JS 侧没有 ortools，所以用 successive shortest path + Johnson 势能（Dijkstra）实现同样的语义；
  * 图规模是 island 级（几十到几百节点），性能不是瓶颈。
  *
+ * 已知遗留：等成本多解时选哪个解，ortools cost-scaling 与这里的 SSP 不同。实测「ortools 恒取弧序字典序最小」
+ * 不成立（mcf-oracle 200 张里 67 张可行、66 张一致）：24 弧小图两解真实成本都是 7，四条弧相同，ortools 走
+ * 弧 #15 [1,3,3,2] 而字典序规则走弧 #3 [1,3,5,2] —— 平局时 ortools 会取靠后的弧。别再花时间复刻。
+ *
  * 与 python 的唯一形式差异：fake node 的 id 是“确定性占位 id”而不是 random.randint。
  * fake node 在算法里仅通过 fake_nodes 集合成员判定（build_flow_nodes_from_lookups 也是按集合判定），
  * 数值本身不参与任何决策，所以不影响结果；但对比 oracle 时要把 fake node 归一化后再比。

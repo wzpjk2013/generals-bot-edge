@@ -33,7 +33,7 @@ const MODULES = [
   'interceptor', 'defense', 'explorationops', 'centraldefense', 'eventhandlers',
   'wincondition', 'comms', 'rendering', 'pathing', 'repetition',
   'statequeries',
-  'flowmodels', 'flowgraph', 'flowmincost', 'flowknapsack', 'flowexpansion',
+  'flowmodels', 'flowgraph', 'flowmincost', 'flowknapsack', 'flowexpansion', 'iterativeexpansion',
   'expandhooks', 'botmain',
 ];
 

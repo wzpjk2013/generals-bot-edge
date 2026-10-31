@@ -70,6 +70,7 @@
         "src/eklipz/flowmincost.js",
         "src/eklipz/flowknapsack.js",
         "src/eklipz/flowexpansion.js",
+      "src/eklipz/iterativeexpansion.js",
         "src/eklipz/expandhooks.js",
         "src/eklipz/botmain.js",
         "src/state.js",
