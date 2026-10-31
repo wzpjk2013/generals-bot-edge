@@ -23,7 +23,7 @@ const path = require('path');
 
 const ROOT = path.join(__dirname, '..', 'src', 'eklipz');
 const MODULES = [
-  'pyrandom',
+  'pyrandom', 'clock', 'pysetorder',
   'tile', 'mapmatrix', 'search', 'path', 'map', 'mapmove', 'nx',
   'armyanalyzer', 'territory', 'board', 'danger', 'city',
   'armytracker', 'opponenttracker', 'tileisland', 'gather', 'mapspanning', 'watchman',
@@ -66,6 +66,20 @@ function readRecords(file) {
 const playerWrites = [];
 const fogFill = [];
 const fogFillUfp = [];
+const connLog = [];
+const detLog = [];
+
+// 把 MapMatrix / Set / MapMatrixSet 统一摊成 Tile 数组（python 侧 list(...) 的对应物）。
+function toTileArr(coll) {
+  if (!coll) return [];
+  if (Array.isArray(coll)) return coll;
+  if (coll.raw && Array.isArray(coll.raw)) return coll.raw.filter(Boolean);
+  try {
+    return Array.from(coll);
+  } catch (e) {
+    return [];
+  }
+}
 let currentTurn = -1;
 
 /*
@@ -163,8 +177,20 @@ function installHooks(ek) {
     ) {
       const before = outputTilesToBeConverted.size;
       const beforeSet = new Set(outputTilesToBeConverted);
-      const inConn = connectedTiles ? Array.from(connectedTiles).map((t) => t.tile_index).slice(0, 12) : null;
-      const inDark = connectedDark ? Array.from(connectedDark).map((t) => t.tile_index).slice(0, 12) : null;
+      const tilesBefore = this.map.players[player].tiles.slice(0, 80).map((t) => t.tile_index);
+      const tileCountBefore = this.map.players[player].tileCount;
+      const inConn = connectedTiles ? Array.from(connectedTiles).map((t) => t.tile_index).slice(0, 40) : null;
+      const inDark = connectedDark ? Array.from(connectedDark).map((t) => t.tile_index).slice(0, 40) : null;
+      const inBan = bannedTiles && bannedTiles.size !== undefined
+        ? Array.from(bannedTiles).map((t) => t.tile_index).slice(0, 40)
+        : null;
+      if (process.env.GB_ORDERCHECK && inConn && inConn.length > 1) {
+        const expect = pySetOrder(inConn);
+        if (JSON.stringify(expect) !== JSON.stringify(inConn)) {
+          console.log('ORDER NOT PY at T' + currentTurn + ' got ' + JSON.stringify(inConn) + ' want ' + JSON.stringify(expect)
+            + ' stack=' + new Error().stack.split('\n').slice(3, 8).map((s) => s.trim()).join(' | '));
+        }
+      }
       const out = origFill.apply(this, arguments);
       const added = [];
       outputTilesToBeConverted.forEach((t) => {
@@ -173,7 +199,9 @@ function installHooks(ek) {
       fogFill.push([currentTurn, player, before, outputTilesToBeConverted.size, numTilesToFillIn,
         out.length, pathToPotentialEnGeneral ? 1 : 0,
         playerExpectedFogTileCounts ? Object.keys(playerExpectedFogTileCounts).length : -1,
-        added, inConn, inDark]);
+        added, inConn, inDark, numStartTilesToFill, inBan,
+        this.map.players[player].tiles.slice(0, 80).map((t) => t.tile_index),
+        tilesBefore, tileCountBefore]);
       return out;
     };
     const origUfp = P.update_fog_prediction;
@@ -186,6 +214,47 @@ function installHooks(ek) {
       const out = origUfp.apply(this, arguments);
       fogFillUfp.push(pre);
       return out;
+    };
+  }
+  if (process.env.GB_LOG_DET && ek.ArmyTracker) {
+    // determine_tiles_to_fill_in 的选择过程：起点序 + 结果，用来定位「落点平局」。
+    const R = ek.ArmyTracker.prototype;
+    const origDet = R.determine_tiles_to_fill_in;
+    R.determine_tiles_to_fill_in = function (connectedDark, bannedTiles, tilesToConvertToAddTo, numTilesToFillIn) {
+      const beforeSet2 = new Set(toTileArr(tilesToConvertToAddTo));
+      const darkIds = toTileArr(connectedDark).map((t) => t.tile_index).slice(0, 60);
+      const out = origDet.apply(this, arguments);
+      const added2 = toTileArr(tilesToConvertToAddTo).filter((t) => !beforeSet2.has(t)).map((t) => t.tile_index);
+      detLog.push([currentTurn, numTilesToFillIn, darkIds, added2]);
+      return out;
+    };
+  }
+
+  if (process.env.GB_LOG_CONN && ek.ArmyTracker) {
+    // 只记「连通集合」这一个出口：banned/connected/core 的长度 + 成员，用来判定上游是
+    // 哪个集合先长歪，而不必逐层 dump 整张图。
+    const Q = ek.ArmyTracker.prototype;
+    const origConn = Q.get_fog_connected_based_on_emergences;
+    Q.get_fog_connected_based_on_emergences = function (player, genLoc, extra) {
+      const res = origConn.apply(this, arguments);
+      const ids = (coll) => {
+        if (!coll) return null;
+        const raw = coll.raw ? coll.raw : coll;
+        const out2 = [];
+        try {
+          raw.forEach((t) => {
+            if (t && t.tile_index !== undefined) out2.push(t.tile_index);
+          });
+        } catch (e) {
+          return null;
+        }
+        return out2;
+      };
+      connLog.push([currentTurn, player,
+        (res[0] && res[0].size !== undefined) ? res[0].size : (ids(res[0]) || []).length,
+        (res[1] && res[1].size !== undefined) ? res[1].size : (ids(res[1]) || []).length,
+        ids(res[1]), genLoc ? genLoc.tile_index : null]);
+      return res;
     };
   }
 }
@@ -269,6 +338,16 @@ function main() {
     const p = process.env.GB_PWRITE_OUT || 'pwrite-js.json';
     fs.writeFileSync(p, JSON.stringify(playerWrites));
     console.log('unseen-tile owner writes=' + playerWrites.length + ' -> ' + p);
+  }
+  if (process.env.GB_LOG_DET) {
+    const p = process.env.GB_DET_OUT || 'det-js.json';
+    fs.writeFileSync(p, JSON.stringify(detLog));
+    console.log('determine-tiles calls=' + detLog.length + ' -> ' + p);
+  }
+  if (process.env.GB_LOG_CONN) {
+    const p = process.env.GB_CONN_OUT || 'conn-js.json';
+    fs.writeFileSync(p, JSON.stringify(connLog));
+    console.log('fog-connected calls=' + connLog.length + ' -> ' + p);
   }
   if (process.env.GB_LOG_FOGFILL) {
     const p = process.env.GB_FOGFILL_OUT || 'fogfill-js.json';

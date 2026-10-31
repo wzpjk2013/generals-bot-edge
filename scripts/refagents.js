@@ -538,7 +538,8 @@ function tileTypeOf(view, i) {
   return 'plain';
 }
 
-function GcBotAgent() {
+function GcBotAgent(rng) {
+  this.rng = rng || Math.random;
   this.inited = false;
   this.turn = 0;
   this.tiles = null;
@@ -847,7 +848,8 @@ GcBotAgent.prototype.plan = function (view) {
 };
 
 GcBotAgent.prototype.rngThreshold = function () {
-  return Math.random();
+  // 原来直连 Math.random ⇒ 同一局面两次跑对手出招不同，"算不算确定性"没法验
+  return this.rng();
 };
 
 /* ---------------- szly：移植 LocalGen-new 的 SzlyBot ---------------- */
@@ -869,7 +871,8 @@ GcBotAgent.prototype.rngThreshold = function () {
  * 迷雾：没见过的格子在 blockType 里记成「空白 / 障碍」，障碍按不可通行处理，
  * 所以它不会往雾里的山/城上撞，但也从不主动去探。
  */
-function SzlyBotAgent() {
+function SzlyBotAgent(rng) {
+  this.rng = rng || Math.random;
   this.inited = false;
   this.lastPos = -1;
   this.myGeneral = -1;
@@ -1069,7 +1072,8 @@ SzlyBotAgent.prototype.plan = function (view) {
       gather = nc;
     }
   }
-  if (gather < 0 || Math.random() * 2 - 1 > pMul * Math.tanh(maxWeight * 0.015)) {
+  // 同上：szly 原来直连 Math.random，跑批两次结果会不一样
+  if (gather < 0 || (this.rng ? this.rng() : Math.random()) * 2 - 1 > pMul * Math.tanh(maxWeight * 0.015)) {
     this.lastPos = fastest;
     return { from: coo, to: fastest, split: false };
   }

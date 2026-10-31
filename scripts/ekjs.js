@@ -27,7 +27,7 @@ const MAX_TURNS = 1200;
 
 /* 装载顺序 = 依赖顺序：底层的先来。botmain 最后（它 _call 找 EK.* 上的兄弟模块）。 */
 const MODULES = [
-  'pyrandom', 'clock',
+  'pyrandom', 'clock', 'pysetorder',
   'tile', 'mapmatrix', 'search', 'path', 'map', 'mapmove', 'nx',
   'armyanalyzer', 'territory', 'board', 'danger', 'city',
   'armytracker', 'opponenttracker', 'tileisland', 'gather', 'mapspanning', 'watchman',
@@ -96,6 +96,20 @@ function scoresFor(board) {
     out.push({ i: p, total: total, tiles: tiles, dead: board.owner[board.generals[p]] !== p });
   }
   return out;
+}
+
+/* 视图指纹：用来区分「局面不同所以招不同」和「局面一样但对手自己漂了」。
+ * FNV-1a 就够，只要两次跑同一局面能出同一个数。 */
+function hashView(view) {
+  let h = 0x811c9dc5;
+  for (const arr of [view.owner, view.armies, view.cities, view.mountains, view.generals]) {
+    if (!arr) continue;
+    for (let i = 0; i < arr.length; i++) {
+      h ^= arr[i] & 0xff;
+      h = (h * 16777619) >>> 0;
+    }
+  }
+  return h.toString(16);
 }
 
 function startDataFor(board, me) {
@@ -249,6 +263,13 @@ function playGameEk(seed, opponent, ekSide, opts) {
         const view = A.makeView(board, p, fogs[p], vis);
         const act = ref.plan(view);
         if (act) A.applyMove(board, p, act.from, act.to, act.split);
+        // 对手的招也要打出来：只比自家招看不出「同一份剧本为何土地数不同」
+        if (opts.trace) {
+          console.log('T' + turn + ' ref ' + (act
+            ? (act.from % W) + ',' + Math.floor(act.from / W) + '>' +
+              (act.to % W) + ',' + Math.floor(act.to / W) + (act.split ? ' half' : '')
+            : '过') + (opts.trace > 1 ? ' vh=' + hashView(view) : ''));
+        }
       }
       if (board.owner[board.generals[1 - p]] === p) {
         winner = p;
@@ -318,7 +339,8 @@ function mulberry32(a) {
 function main() {
   const opponent = process.argv[2] || 'gc';
   const games = Number(process.argv[3] || 4);
-  const trace = !!process.env.GB_EK_TRACE;
+  // 1 = 招法轨迹；2 = 额外打对手视图指纹（区分「局面不同」与「同局面下对手自己漂」）
+  const trace = process.env.GB_EK_TRACE ? Number(process.env.GB_EK_TRACE) || 1 : 0;
   const seeds = Math.ceil(games / 2);
 
   const tasks = [];

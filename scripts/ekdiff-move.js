@@ -31,7 +31,7 @@ const flag = (name) => process.argv.includes('--' + name);
 
 const ROOT = path.join(__dirname, '..', 'src', 'eklipz');
 const MODULES = [
-  'pyrandom', 'clock',
+  'pyrandom', 'clock', 'pysetorder',
   'tile', 'mapmatrix', 'search', 'path', 'map', 'mapmove', 'nx',
   'armyanalyzer', 'territory', 'board', 'danger', 'city',
   'armytracker', 'opponenttracker', 'tileisland', 'gather', 'mapspanning', 'watchman',

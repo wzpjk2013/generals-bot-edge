@@ -286,18 +286,33 @@
   }
 
   function trim_spanning_tree_ends_as_new_set(toTrim, trimDepth, minRemainingCount) {
-    var remainingNodes = new Set(toTrim);
+    // 原版 remainingNodes 是 set：每轮候选 [n for n in remainingNodes ...] 按 CPython 表
+    // 的槽位序生成，而「命中 minRemainingCount 就提前返回」意味着最后删掉的是哪一个
+    // 直接决定剩下多少格。CPython 删除不缩容，所以整轮复用同一张表。
+    // py set 序 = tile_index & (cap-1) 槽位序，见 EK.PySetOrder。
+    var pso = EK.PySetOrder;
+    var remaining = pso ? new pso.PySet(toTrim) : new Set(toTrim);
+    var orderOf = function (coll) {
+      return pso ? coll.order() : Array.from(coll);
+    };
+    var sizeOf = function (coll) {
+      return coll.size;
+    };
+    var deleteFrom = function (coll, n) {
+      coll.delete(n);
+    };
     for (var iteration = 0; iteration < trimDepth; iteration++) {
       var ends = [];
-      remainingNodes.forEach(function (n) {
-        if (is_end_node_in_spanning_tree(n, remainingNodes)) ends.push(n);
-      });
+      var current = orderOf(remaining);
+      for (var k = 0; k < current.length; k++) {
+        if (is_end_node_in_spanning_tree(current[k], remaining)) ends.push(current[k]);
+      }
       for (var i = 0; i < ends.length; i++) {
-        remainingNodes.delete(ends[i]);
-        if (remainingNodes.size === minRemainingCount) return remainingNodes;
+        deleteFrom(remaining, ends[i]);
+        if (sizeOf(remaining) === minRemainingCount) return remaining;
       }
     }
-    return remainingNodes;
+    return remaining;
   }
 
   /* ---------------------------------------------------------------- 导出 */

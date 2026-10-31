@@ -678,7 +678,8 @@
       if (myTiles[i].army <= 1) prefer.add(myTiles[i]);
     }
     var allowNeg = allowNegative === undefined ? includeNegative : allowNegative;
-    var res = prune(gatherNodes, minGather, general.player(), map.get_teams_array(map),
+    /* get_teams_array 是 Map 上的静态方法（src/eklipz/map.js:1046），实例上没有 */
+    var res = prune(gatherNodes, minGather, general.player(), EK.Map.get_teams_array(map),
       0, null, true, null, null, prefer, !!allowNeg, true, 0);
     if (!res) return gatherNodes;
     return res[2];
@@ -1163,7 +1164,7 @@
     var general = generalOf(bot);
     var prefer = (bot.expansion_plan && bot.expansion_plan.preferred_tiles)
       ? bot.expansion_plan.preferred_tiles : null;
-    var res = prune(gatherNodes, targetArmy, general.player(), map.get_teams_array(map),
+    var res = prune(gatherNodes, targetArmy, general.player(), EK.Map.get_teams_array(map),
       additionalIncrement, null, true, null, null, prefer,
       includeNegative === undefined ? true : !!includeNegative, true, minTurns);
     if (!res) return gatherNodes;

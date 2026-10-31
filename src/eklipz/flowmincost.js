@@ -38,7 +38,32 @@
     return typeof tile.player === 'function' ? tile.player() : tile.player;
   }
 
-  // python 用 set/dict 迭代时，这里的等价物一律按 unique_id 升序，保证可复现。
+  // 岛的最小 tile_index：python OrderedTileIslandSet 就是按它排序的，而 ortools 的
+  // 弧插入顺序跟着这个序走；等成本平局解由弧序决定，所以这里必须一致。
+  function islandMinTileIndex(island) {
+    var tiles = island.tile_set;
+    var min = Infinity;
+    if (tiles) {
+      if (typeof tiles.forEach === 'function') {
+        tiles.forEach(function (t) {
+          if (t && t.tile_index < min) min = t.tile_index;
+        });
+      } else if (tiles.length !== undefined) {
+        for (var i = 0; i < tiles.length; i++) {
+          var t = tiles[i];
+          if (t && t.tile_index < min) min = t.tile_index;
+        }
+      }
+    }
+    if (min === Infinity) {
+      var byArmy = island.tiles_by_army;
+      if (byArmy && byArmy.length) min = byArmy[0].tile_index;
+    }
+    return min === Infinity ? island.unique_id : min;
+  }
+
+  // python 用 set/dict 迭代时，这里的等价物一律按「最小 tile_index」升序（= python
+  // OrderedTileIslandSet 的序），保证可复现且与 ortools 弧序一致。
   // tileisland.js 的岛集合可能是 array / Map / 带 items() 的对象，全部吃下。
   function sortedIslands(islandBuilder) {
     var all = islandBuilder.all_tile_islands;
@@ -49,7 +74,12 @@
     else if (typeof all.values === 'function') list = Array.from(all.values());
     var out = [];
     for (var i = 0; i < list.length; i++) out.push(list[i]);
-    out.sort(function (a, b) { return a.unique_id - b.unique_id; });
+    out.sort(function (a, b) {
+      var ma = islandMinTileIndex(a);
+      var mb = islandMinTileIndex(b);
+      if (ma !== mb) return ma - mb;
+      return a.unique_id - b.unique_id;
+    });
     return out;
   }
 
@@ -1083,6 +1113,8 @@
     allNodeIds.delete(0);
     var nodeList = [];
     allNodeIds.forEach(function (n) { nodeList.push(n); });
+    /* python 侧 node_list = sorted(all_node_ids)（OrToolsFlowDirectionFinder.py:1512），
+     * 所以这里必须升序；不是 set 迭代序。 */
     nodeList.sort(function (a, b) { return a - b; });
     var nodeToIdx = new Map();
     var idxToNode = new Map();

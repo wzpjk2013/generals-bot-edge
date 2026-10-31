@@ -153,6 +153,44 @@
     if (at >= 0) arr.splice(at, 1);
   }
 
+  /* ---------------- python set 迭代序 ---------------- */
+
+  /*
+   * 原版把 Tile 塞进 set、再摊成 list 当 BFS 起点/贪心顺序，于是「先摸到哪一格」由
+   * CPython 哈希表槽位决定。实现在 pysetorder.js（模块 EK.PySetOrder），这里只是转发；
+   * 兜底分支防脚本没加载时钟/序模块时抛异常。
+   * py set 序 = tile_index & (cap-1) 槽位序，见 pySetOrderIndices。
+   */
+  function pso() {
+    return EK.PySetOrder;
+  }
+
+  function pyHashOrder(tiles) {
+    var m = pso();
+    return m ? m.pyHashOrder(tiles) : toArray(tiles);
+  }
+
+  function pyOrderedSet(tiles) {
+    var m = pso();
+    return m ? m.pyOrderedSet(tiles) : new Set(toArray(tiles));
+  }
+
+  function pySetOrderIndices(coll) {
+    var m = pso();
+    return m ? m.pySetOrderIndices(coll) : toArray(coll);
+  }
+
+  /*
+   * python 的 `connectedTiles.copy()` = set_merge 按 used*2 预分配，表容量比原表大一档，
+   * 于是 copy 出来的迭代序和原集合不同（16 个成员：原 cap32，copy 后 cap64）。
+   * 所有 `X.copy()` 的位置都走这里，别用 pySetOrderIndices 代替。
+   */
+  function pySetCopyIndices(coll) {
+    var m = pso();
+    if (m && typeof m.pySetCopyOrder === 'function') return m.pySetCopyOrder(pySetOrderIndices(coll));
+    return pySetOrderIndices(coll).slice();
+  }
+
   function toArray(coll) {
     if (coll === null || coll === undefined) return [];
     if (Array.isArray(coll)) return coll;
@@ -3636,6 +3674,26 @@
   };
 
   P._check_over_elimination = function (player) {
+    /* 重入保护：py 这里靠「重置后 numValid 一定 > 0」自然终止，JS 侧一旦重置没造出任何
+     * 合法格（valid_spawns / discovered 口径差一格），mustResetAndIncrease 恒真就会
+     * re_limit → _limit_… → _check_over_elimination 无限递归，直接把整回合打成
+     * RangeError: Maximum call stack size exceeded。py 在同情形下是 RecursionError，
+     * 线上 rethrow=False 同样整回合不出招，所以这里直接停手比爆栈更贴近原版语义。 */
+    var depth = this._overElimDepth || 0;
+    if (depth >= 6) {
+      this.overElimDepthHits = (this.overElimDepthHits || 0) + 1;
+      return;
+    }
+    this._overElimDepth = depth + 1;
+    try {
+      this._check_over_elimination_body(player);
+    } finally {
+      this._overElimDepth = depth;
+    }
+  };
+
+  // 迭代失败时最容易在这里被找到痕迹
+  P._check_over_elimination_body = function (player) {
     if (player === -1) return;
     if (this.map.players[player].dead) return;
     if (player === this.map.player_index) return;
@@ -3686,11 +3744,24 @@
       var validTiles = this.map.pathable_tiles;
       if (this.map.valid_spawns) validTiles = this.map.valid_spawns;
       var validArr = toArray(validTiles);
+      var resetTrue = 0;
       for (var v = 0; v < validArr.length; v++) {
         var t2 = validArr[v];
         if (!t2.discovered && !t2.isCity && !t2.visible && !t2.isGeneral && (t2.player() === -1 || t2.player() === player)) {
           validGenPos.raw[t2.tile_index] = true;
+          resetTrue += 1;
         }
+      }
+      /* 一格都没恢复 ⇒ 下一轮 numValid 仍是 0 ⇒ 无限递归。这里留下现场，
+       * 因为真出问题时光看栈只知道在递归，看不出是 valid_spawns 还是 discovered 口径差。 */
+      if (resetTrue === 0 && root.console && root.console.error) {
+        root.console.error(
+          '[GBAuto] armytracker 重置合法将军位置后一格未恢复 player=' + player +
+          ' turn=' + this.map.turn +
+          ' validSpawns=' + (this.map.valid_spawns ? this.map.valid_spawns.size : 'none') +
+          ' pathable=' + (this.map.pathable_tiles ? this.map.pathable_tiles.size : 'none') +
+          ' numValid=' + numValid
+        );
       }
       var playerEvents = byPlayer(this.uneliminated_emergence_events, player);
       if (!playerEvents) return;
@@ -3898,12 +3969,15 @@
         else delete counts[tile.army];
       }
 
-      var connectedTiles = new Set(player.tiles);
+      // 原版：connectedTiles = set(player.tiles)；connectedDark = set(未见的)。
+      // py set 序 = tile_index & (cap-1) 槽位序，见 pySetOrderIndices
+      var connectedTiles = pyOrderedSet(player.tiles);
       var setTilesToConvert = new Set();
-      var connectedDark = new Set();
+      var darkSeed = [];
       connectedTiles.forEach(function (t) {
-        if (!t.visible) connectedDark.add(t);
+        if (!t.visible) darkSeed.push(t);
       });
+      var connectedDark = pyOrderedSet(darkSeed);
       var tempPredictions = this._fill_land_from_connected_tiles_for_player(
         playerIndex,
         new Set(),
@@ -3976,8 +4050,10 @@
 
     var numTilesToFillIn = this.map.players[player].tileCount - this.map.players[player].tiles.length;
 
+    // py set 序 = tile_index & (cap-1) 槽位序，见 pySetOrderIndices
+    var connectedTilesPy = pyOrderedSet(connectedTiles);
     var connectedDark = [];
-    connectedTiles.forEach(function (t) {
+    connectedTilesPy.forEach(function (t) {
       if (
         !t.visible ||
         S().any_where(t.movable, function (m) {
@@ -3994,7 +4070,7 @@
       player,
       bannedTiles,
       connectedDark,
-      connectedTiles,
+      connectedTilesPy,
       numStartTilesToFill,
       numTilesToFillIn,
       ourGen,
@@ -4046,7 +4122,10 @@
       }
     });
 
-    unrecapturedEmergenceEvents.forEach(function (t) {
+    // py set 序 = tile_index & (cap-1) 槽位序，见 pySetOrderIndices。
+    // requiredTiles 的顺序会一路传进 get_spanning_tree_set_from_tile_lists，等成本路径的
+    // 取舍按它来，所以这两个 set 必须按 python 序摊开。
+    pySetOrderIndices(unrecapturedEmergenceEvents).forEach(function (t) {
       if (!requiredIncluded.has(t)) {
         requiredIncluded.add(t);
         requiredTiles.push(t);
@@ -4064,7 +4143,8 @@
     }
 
     if (requiredIncluded.size === 0) {
-      tilesEverOwned.forEach(function (t) {
+      // py set 序 = tile_index & (cap-1) 槽位序，见 pySetOrderIndices。
+      pySetOrderIndices(tilesEverOwned).forEach(function (t) {
         if (t.isNotPathable) return;
         if (
           !S().any_where(t.movable, function (m) {
@@ -4179,9 +4259,11 @@
     playerExpectedFogTileCounts,
     outputTilesToBeConverted
   ) {
-    var secondIterConnected = new Set(connectedTiles);
+    // 原版 `secondIterConnected = connectedTiles.copy()`：copy 是 set_merge 预分配，
+    // 表容量按 used*2，迭代序与源集合不同 ⇒ 必须走 copy 语义。
+    var secondIterConnected = pySetCopyIndices(connectedTiles);
     if (pathToPotentialEnGeneral !== null && pathToPotentialEnGeneral !== undefined) {
-      for (var i = 0; i < pathToPotentialEnGeneral.tileList.length; i++) secondIterConnected.add(pathToPotentialEnGeneral.tileList[i]);
+      for (var i = 0; i < pathToPotentialEnGeneral.tileList.length; i++) secondIterConnected.push(pathToPotentialEnGeneral.tileList[i]);
     }
     if (pathToPotentialEnGeneral !== null && pathToPotentialEnGeneral !== undefined) {
       /* 这条禁令防止把 connectedDark 重复填充：可以路过，但不写回 */
@@ -4205,13 +4287,9 @@
 
       nearGenBan.delete(pathToPotentialEnGeneral.tail.tile);
       this.determine_tiles_to_fill_in([approxEnGen], nearGenBan, outputTilesToBeConverted, numStartTilesToFill + 1);
-      secondIterConnected = new Set();
-      connectedTiles.forEach(function (t) {
-        secondIterConnected.add(t);
-      });
-      outputTilesToBeConverted.forEach(function (t) {
-        secondIterConnected.add(t);
-      });
+      // itertools.chain(connectedTiles, outputTilesToBeConverted)：两个 set 各自按迭代序摊开再拼接，
+      // 不能对并集重新排序。py set 序 = tile_index & (cap-1) 槽位序，见 pySetOrderIndices
+      secondIterConnected = pySetOrderIndices(connectedTiles).concat(pySetOrderIndices(outputTilesToBeConverted));
     }
 
     this.determine_tiles_to_fill_in(secondIterConnected, bannedTiles, outputTilesToBeConverted, numTilesToFillIn);
@@ -4269,7 +4347,9 @@
   P.determine_tiles_to_fill_in = function (connectedDark, bannedTiles, tilesToConvertToAddTo, numTilesToFillIn) {
     var self = this;
     var beforeCount = tilesToConvertToAddTo.size;
-    var connectedDarkList = toArray(connectedDark);
+    // 起点列表的顺序决定 BFS（栈）先摸到哪一格。
+    // py set 序 = tile_index & (cap-1) 槽位序，见 pySetOrderIndices。
+    var connectedDarkList = pySetOrderIndices(connectedDark);
     var preseededConnectedDark = 0;
     var skips = new Set(toArray(bannedTiles));
     for (var i = 0; i < connectedDarkList.length; i++) skips.delete(connectedDarkList[i]);
@@ -4304,9 +4384,12 @@
     };
 
     var add_deferred_vision_edge_tiles_if_needed = function () {
-      for (var d of deferredVisionEdgeTileSet) {
+      // 「够数就停」意味着 set 的迭代序决定补哪一格。
+      // py set 序 = tile_index & (cap-1) 槽位序，见 pySetOrderIndices。
+      var deferredOrdered = pySetOrderIndices(deferredVisionEdgeTileSet);
+      for (var d2 = 0; d2 < deferredOrdered.length; d2++) {
         if (tilesToConvertToAddTo.size >= numFillTilesNeeded) return;
-        tilesToConvertToAddTo.add(d);
+        tilesToConvertToAddTo.add(deferredOrdered[d2]);
       }
     };
 
@@ -4548,18 +4631,26 @@
   }
 
   function trimSpanningTreeEndsAsNewSet(toTrim, trimDepth, minRemainingCount) {
-    var remainingNodes = new Set(toTrim);
+    // [n for n in remainingNodes ...] 走的是 set 迭代序；命中 minRemainingCount 就提前
+    // 返回，所以「最后删掉哪一个」决定剩余集合。CPython 删除不缩容 → 整轮同一张表。
+    // py set 序 = tile_index & (cap-1) 槽位序，见 pySetOrderIndices。
+    var pso = EK.PySetOrder;
+    var remaining = pso ? new pso.PySet(toTrim) : new Set(toTrim);
+    var orderOf = function (coll) {
+      return pso ? coll.order() : toArray(coll);
+    };
     for (var iteration = 0; iteration < trimDepth; iteration++) {
       var ends = [];
-      remainingNodes.forEach(function (n) {
-        if (isEndNodeInSpanningTree(n, remainingNodes)) ends.push(n);
-      });
+      var current = orderOf(remaining);
+      for (var k = 0; k < current.length; k++) {
+        if (isEndNodeInSpanningTree(current[k], remaining)) ends.push(current[k]);
+      }
       for (var i = 0; i < ends.length; i++) {
-        remainingNodes.delete(ends[i]);
-        if (remainingNodes.size === minRemainingCount) return remainingNodes;
+        remaining.delete(ends[i]);
+        if (remaining.size === minRemainingCount) return remaining;
       }
     }
-    return remainingNodes;
+    return remaining;
   }
 
   EK.Army = Army;
