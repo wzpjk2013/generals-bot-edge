@@ -24,6 +24,15 @@
   'use strict';
 
   var EK = (root.__EK = root.__EK || {});
+
+  // 浏览器里没有 process，直接读 process.env 会 ReferenceError 打断整回合决策。
+  function dbgFlag(name) {
+    try {
+      return typeof process !== 'undefined' && process.env ? process.env[name] : undefined;
+    } catch (e) {
+      return undefined;
+    }
+  }
   var M = root.Map; // 本文件不定义同名 Map，这里只为以后好读，实际不用
 
   var SAFE_PLAYERS_CAP = 20;
@@ -1539,7 +1548,7 @@
     if (player === -2) player = tile.player();
 
     var teamScores = this.current_team_scores[currentCycleStats.team];
-    if (process.env.GB_EK_DEBUG) {
+    if (dbgFlag('GB_EK_DEBUG')) {
       console.error('[dbg] _execute_emergence team=' + currentCycleStats.team
         + ' scoresNull=' + (teamScores === null || teamScores === undefined)
         + ' len=' + this.current_team_scores.length

@@ -929,26 +929,33 @@
   var STATS = { calls: 0, moves: 0, reasons: {}, by_name: {} };
 
   // GB_EXPLORE_DEBUG 的诊断计数：定位「入口被调用却总返回 null」的原因分布
+  // 浏览器里没有 process，所以统一走 dbgFlag，别直接读 process.env。
+  function dbgFlag(name) {
+    try {
+      return typeof process !== 'undefined' && process.env ? process.env[name] : undefined;
+    } catch (e) {
+      return undefined;
+    }
+  }
+
   function bump(reason) {
-    if (!process.env || !process.env.GB_EXPLORE_DEBUG) return;
+    if (!dbgFlag('GB_EXPLORE_DEBUG')) return;
     STATS.reasons[reason] = (STATS.reasons[reason] || 0) + 1;
   }
 
-  if (typeof process !== 'undefined' && process.env && process.env.GB_EXPLORE_DEBUG) {
+  if (dbgFlag('GB_EXPLORE_DEBUG') && typeof process !== 'undefined' && process.on) {
     process.on('exit', function () {
       console.error('[explorationops] degraded: ' + (Array.from(MISSING).join(', ') || '(none)'));
       console.error('[explorationops] entry calls ' + STATS.calls + ', returned move ' + STATS.moves);
-      if (process.env.GB_EXPLORE_DEBUG) {
-        console.error('[explorationops] reasons ' + JSON.stringify(STATS.reasons));
-        console.error('[explorationops] by_name ' + JSON.stringify(STATS.by_name));
-      }
+      console.error('[explorationops] reasons ' + JSON.stringify(STATS.reasons));
+      console.error('[explorationops] by_name ' + JSON.stringify(STATS.by_name));
     });
   }
 
   function entry_finished(name, move) {
     STATS.calls += 1;
     if (move !== null && move !== undefined) STATS.moves += 1;
-    if (process.env && process.env.GB_EXPLORE_DEBUG) {
+    if (dbgFlag('GB_EXPLORE_DEBUG')) {
       var s = STATS.by_name[name] || (STATS.by_name[name] = { calls: 0, moves: 0 });
       s.calls += 1;
       if (move !== null && move !== undefined) s.moves += 1;

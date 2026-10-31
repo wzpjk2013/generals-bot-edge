@@ -453,6 +453,20 @@
       this.enemyGeneral = this.map.generals[targetPlayer] || null;
     }
     this.island_builder = islands;
+    // 原版每次进来都把计时器/将军/互将军分析重新同步进已有的 finder（py 411-444）。
+    // finder 是跨回合复用的，islands 每回合是新对象，不重赋就会拿上一回合的分析去建图。
+    var findersToSync = [this._networkx_finder, this._pymax_finder, this._ortools_finder];
+    for (var fs = 0; fs < findersToSync.length; fs++) {
+      var finderToSync = findersToSync[fs];
+      if (!finderToSync) continue;
+      finderToSync.perf_timer = this.perf_timer;
+      finderToSync.log_debug = this.log_debug;
+      finderToSync.friendly_general = this.friendlyGeneral;
+      finderToSync.use_backpressure_from_enemy_general = this.use_backpressure_from_enemy_general;
+      finderToSync._intergeneral_analysis = islands.intergeneral_analysis;
+      finderToSync.intergeneral_analysis = islands.intergeneral_analysis;
+    }
+
     this.bonus_capture_point_matrix = bonusCapturePointMatrix || null;
     this.negative_tiles = negativeTiles || null;
     this.threat_blocking_tiles = threatBlockingTiles || null;
@@ -642,8 +656,7 @@
 
     var ourIslands = islands.tile_islands_by_team_id[this.team] || [];
     var islandsByUniqueId = islands.tile_islands_by_unique_id || {};
-    var pairs = [];
-    var seen = new Set();
+    var result = [];
 
     for (var i = 0; i < ourIslands.length; i++) {
       var friendlyIsland = ourIslands[i];
@@ -653,6 +666,11 @@
       var lookups = [noNeutLookup];
       if (incNeutLookup) lookups.push(incNeutLookup);
 
+      // 每个友好岛单独攒 to 再单独排序：原版就是这么写的，输出天然按「先友好岛顺序、
+      // 后该岛目标流量降序」分组。全局排序会把不同源岛的目标混在一起，下游
+      // lookup 表顺序、knapsack 组顺序全跟着变。
+      var to = new Map();
+      var toOrder = [];
       for (var li = 0; li < lookups.length; li++) {
         var friendlyNode = lookups[li].get(friendlyIsland.unique_id);
         if (!friendlyNode) continue;
@@ -663,37 +681,36 @@
           // 己队但不可穿越的岛不是攻占目标（那是自己的地）
           if (targetIsland.team === this.team && !targetCrossableIslands.has(targetIsland.unique_id)) continue;
           if (targetIsland.team !== this.target_team && targetIsland.team !== -1) continue;
-          var pairKey = friendlyIsland.unique_id + '->' + targetIsland.unique_id;
           if (this._is_blocked_by_threat_blocking_tiles_pair(friendlyIsland, targetIsland)) {
             // 原版这里 raise；威胁封锁只是「别从这条路走」，跳过比崩掉合理
             continue;
           }
-          if (!seen.has(pairKey)) {
-            seen.add(pairKey);
-            pairs.push({
-              pair: new FlowBorderPairKey(friendlyIsland.unique_id, targetIsland.unique_id),
-              edgeArmySum: 0
-            });
-          }
-          for (var pi = 0; pi < pairs.length; pi++) {
-            if (pairs[pi].pair.key === pairKey) { pairs[pi].edgeArmySum += edge.edge_army; break; }
+          if (edge.edge_army > 0) {
+            var tid = targetIsland.unique_id;
+            if (!to.has(tid)) { to.set(tid, 0); toOrder.push(tid); }
+            to.set(tid, to.get(tid) + edge.edge_army);
           }
         }
       }
+
+      // 原版按 (流量和, 目标岛 tile_count_all_adjacent_friendly) 降序；流量高的先建表，
+      // 后面的组在背包里天然排前面，顺序会影响 conflict-resolution 的选择，所以必须保序。
+      toOrder.sort(function (a, b) {
+        var da = to.get(a);
+        var db = to.get(b);
+        if (da !== db) return db - da;
+        var ia = islandsByUniqueId[a];
+        var ib = islandsByUniqueId[b];
+        var ca = ia ? ia.tile_count_all_adjacent_friendly : 0;
+        var cb = ib ? ib.tile_count_all_adjacent_friendly : 0;
+        return cb - ca;
+      });
+
+      for (var oi = 0; oi < toOrder.length; oi++) {
+        result.push(new FlowBorderPairKey(friendlyIsland.unique_id, toOrder[oi]));
+      }
     }
 
-    // 原版按 (流量和, 目标岛 tile_count_all_adjacent_friendly) 降序；流量高的先建表，
-    // 后面的组在背包里天然排前面，顺序会影响 conflict-resolution 的选择，所以必须保序。
-    pairs.sort(function (a, b) {
-      if (b.edgeArmySum !== a.edgeArmySum) return b.edgeArmySum - a.edgeArmySum;
-      var ia = islandsByUniqueId[a.pair.target_island_id];
-      var ib = islandsByUniqueId[b.pair.target_island_id];
-      var ca = ia ? ia.tile_count_all_adjacent_friendly : 0;
-      var cb = ib ? ib.tile_count_all_adjacent_friendly : 0;
-      return cb - ca;
-    });
-
-    var result = pairs.map(function (p) { return p.pair; });
     endPerf(evt);
     return result;
   };

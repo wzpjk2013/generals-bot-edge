@@ -29,6 +29,15 @@
 
   var EK = (root.__EK = root.__EK || {});
 
+  // 浏览器里没有 process，直接读 process.env 会 ReferenceError 打断整回合决策。
+  function dbgFlag(name) {
+    try {
+      return typeof process !== 'undefined' && process.env ? process.env[name] : undefined;
+    } catch (e) {
+      return undefined;
+    }
+  }
+
   // 原版 PivotWRP.longest_crossing 初值。connect_graph 不会被调用，所以恒为它。
   var LONGEST_CROSSING = 20;
 
@@ -492,8 +501,19 @@
     }
 
     var startTime = deterministicTime ? 0 : Date.now() / 1000;
+    if (dbgFlag('GB_WATCHMAN_DEBUG') === '1') {
+      console.log('[watchman] start reveal ' + tiles.length + ' budget ' + timeLimit +
+        ' start ' + startTile.tile_index + ' turn ' + (map.turn));
+    }
     var wrp = new PivotIterativeWRP(map, startTile, tiles, initialArmy, deterministicTime);
     var path = wrp.solve(startTime + timeLimit);
+
+    if (dbgFlag('GB_WATCHMAN_DEBUG') === '1') {
+      var el = (deterministicTime ? 0 : Date.now() / 1000) - startTime;
+      console.log('[watchman] reveal ' + tiles.length + ' budget ' + timeLimit +
+        ' elapsed ' + el.toFixed(3) + 's pivots ' + (wrp.pivot_set ? wrp.pivot_set.length : -1) +
+        ' len ' + (path === null ? -1 : path.length));
+    }
 
     if (path === null || path.length === 0) return null;
     return path;

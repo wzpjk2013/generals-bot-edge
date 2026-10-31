@@ -525,7 +525,14 @@
       return optimize_city_expand(alreadyOwned, cutoffTime, debugViewInfo, distToGenMap, genArmyAtStart, general, map, mapTurnAtStart, noLog, pruneCutoff, shuffleLaunches, skipTiles, tileMinimizationMaps);
     }
 
-    // 原版这里按 cutoff_time 切时间片；本移植不要时间预算，perCutoff 恒为「现在」= 之后所有比较都为假
+    // 原版 EarlyExpandUtils.py:479-484：默认 3 秒预算；外部给了 cutoff_time 就
+    // 换算成剩余时长，然后清空（之后只用 perCutoff）。
+    var timeLimit = 3.0;
+    if (cutoffTime) {
+      timeLimit = cutoffTime - nowSeconds();
+      cutoffTime = null;
+    }
+
     var startTime = nowSeconds();
 
     var i = 0;
@@ -536,7 +543,13 @@
       var genArmy = comboTuple[0];
       var optimalWastedMoves = comboTuple[1];
       var launchTurn = (genArmy - 1) * 2;
-      var perCutoff = startTime;
+      // 原版 :493-498：每个候选分到 timeLimit/候选数 的时间片；shuffle 时整块给
+      var perCutoff = cutoffTime;
+      if (perCutoff === null || perCutoff === undefined) {
+        perCutoff = shuffleLaunches
+          ? startTime + timeLimit
+          : startTime + (timeLimit / combinationsWithMaxOptimal.length) * i;
+      }
 
       if (mapTurnAtStart > launchTurn) continue;
 
@@ -662,7 +675,7 @@
 
     if (IS_DEBUGGING) cutoffTime = nowSeconds() + 1000.0;
 
-    if (nowSeconds() > cutoffTime) return [capped, pathList];
+    if (pastCutoff(cutoffTime)) return [capped, pathList];
 
     visitedSet = new Set(visitedSet);
 
@@ -847,7 +860,8 @@
     if (shuffleLaunches) shuffleInPlace(forced);
 
     var nextStart = nowSeconds();
-    var totalTime = cutoffTime - nextStart;
+    // cutoff 为 null（不给预算）时不能做减法，NaN 会污染下面的 timeEach
+    var totalTime = (cutoffTime === null || cutoffTime === undefined) ? 1e9 : cutoffTime - nextStart;
     var timeEach = totalTime / forced.length;
     var divisions = 1;
 
@@ -868,9 +882,9 @@
       var bestCaseResult = visitedSet.size + turnsLeft - forceWastedMoves;
       if (bestCaseResult < pruneBelow) continue;
 
-      if (nowSeconds() > cutoffTime) break;
+      if (pastCutoff(cutoffTime)) break;
 
-      var newCutoff = Math.min(cutoffTime, nextStart + timeEach);
+      var newCutoff = minCutoff(cutoffTime, nextStart + timeEach);
       timeEach = Math.max(minTimeEach, timeEach - reduc);
 
       var res = _sub_optimize_first_25_specific_wasted(map, general, genArmy, distToGenMap, tileWeightMaps, turn, forceWastedMoves, allowWastedMoves, pruneBelow, visitedSet, newCutoff, null, skipTiles, shuffleLaunches, dontForceFirst, debugViewInfo, addlLevelsRandSkips, segmentIndex, noLog);
@@ -897,7 +911,7 @@
           if (path !== null) {
             var pathLen = path.length;
             if (pathLen > 5) {
-              newCutoff = Math.min(cutoffTime, nextStart + timeEach);
+              newCutoff = minCutoff(cutoffTime, nextStart + timeEach);
               timeEach = Math.max(minTimeEach, timeEach - reduc);
               var pickable = path.tileList.slice(1, Math.min(pathLen - 1, 6));
               // 原版 random.choice(path.tileList[1:min(pathLen-1,6)])
@@ -932,7 +946,7 @@
           if (path2 !== null) {
             var skips = path2.tileSet;
 
-            newCutoff = Math.min(cutoffTime, nextStart + timeEach);
+            newCutoff = minCutoff(cutoffTime, nextStart + timeEach);
             timeEach = Math.max(minTimeEach, timeEach - reduc);
 
             var altRes2 = _sub_optimize_first_25_specific_wasted(map, general, genArmy, distToGenMap, tileWeightMaps, turn, forceWastedMoves, allowWastedMoves, pruneBelow, visitedSet, newCutoff, skips, skipTiles, shuffleLaunches, dontForceFirst, debugViewInfo, addlLevelsRandSkips, segmentIndex, noLog);
@@ -1242,10 +1256,34 @@
   }
 
   /* ==================================================================
-   * 时间：本移植不要时间预算，统一返回 0，等价于原版「时间永远够用」
+   * 时间预算
+   *
+   * 原版用 time.perf_counter() 切时间片（optimize_first_25 默认 3 秒，按候选数
+   * 分摊）。移植早期为了让对拍可复现，这里固定返回 0 —— 于是所有 cutoff 永不
+   * 触发，搜到底：实测 T2 单步 15s、T3~T16 各 2.5s。真机 tick 只有 ~500ms，开局
+   * 就掉队，所以**默认必须走真实时钟**。
+   *
+   * 需要可复现（oracle 对拍）时：
+   *   EK.EarlyExpandUtils.set_fixed_now(0)  // 0 = 「时间永远够用」，即旧行为
+   *   或环境变量 GB_EK_FIXED_TIME=0
    * ================================================================== */
+  var _fixedNow = null;
+  function setFixedNow(v) {
+    _fixedNow = (v === undefined || v === null) ? null : v;
+  }
   function nowSeconds() {
-    return 0;
+    if (_fixedNow !== null) return _fixedNow;
+    return Date.now() / 1000;
+  }
+  // cutoff 为 null 表示「不给时间预算」。不能拿它直接跟 now 比：JS 里 null→0，
+  // 真实时钟下会立刻判定超时。
+  function pastCutoff(cutoffTime) {
+    if (cutoffTime === null || cutoffTime === undefined) return false;
+    return nowSeconds() > cutoffTime;
+  }
+  function minCutoff(cutoffTime, value) {
+    if (cutoffTime === null || cutoffTime === undefined) return value;
+    return Math.min(cutoffTime, value);
   }
 
   // 原版这里直接调模块级 random（random.shuffle / random.choice），对拍时靠
@@ -1292,6 +1330,9 @@
     _set_rng: function (fn) {
       _rng = fn;
     },
+    // 给 oracle / 对拍用：把时钟冻住（0 = 时间永远够用，等价于旧的确定性行为）
+    set_fixed_now: setFixedNow,
+    _now_seconds: nowSeconds,
   };
 
   EK.EarlyExpandUtils = EarlyExpandUtils;

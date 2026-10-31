@@ -57,7 +57,12 @@
         return valueFunc(tile);
       };
     }
-    var raw = valueFunc.raw || valueFunc.matrix || null;
+    // MapMatrix / 裸数组 / Float64Array 都能按索引取；少了这个分支，typed array
+    // 会被静默当成 0，优先级矩阵整场失效而外部看不出任何报错。
+    var raw =
+      valueFunc.raw ||
+      valueFunc.matrix ||
+      (typeof valueFunc.length === 'number' && typeof valueFunc !== 'string' ? valueFunc : null);
     if (raw) {
       return function (tile) {
         var v = raw[tile.tile_index];

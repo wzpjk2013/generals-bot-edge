@@ -72,7 +72,7 @@ function client(wsUrl) {
             pending.set(msg.id, { res, rej });
             setTimeout(() => {
               if (pending.delete(msg.id)) rej(new Error('timeout ' + method));
-            }, 20000);
+            }, Number(process.env.GB_CDP_TIMEOUT || 20000));
           });
         },
         close: () => ws.close()

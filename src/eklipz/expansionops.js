@@ -39,6 +39,16 @@
 (function (root) {
   var EK = (root.__EK = root.__EK || {});
 
+  // 浏览器里没有 process，直接读 process.env 会 ReferenceError 把整回合决策打断
+  // （1.2.0 真机「决策 0 / 下发 0」就是这个）。所有调试开关统一走这里。
+  function dbgFlag(name) {
+    try {
+      return typeof process !== 'undefined' && process.env ? process.env[name] : undefined;
+    } catch (e) {
+      return undefined;
+    }
+  }
+
   function bm(bot) {
     return bot.map || bot._map;
   }
@@ -412,10 +422,10 @@
 
     plan = bot.city_expand_plan;
     if (plan === null || plan === undefined) {
-      if (process.env.GB_EK_DEBUG) console.error('[dbg] f25 plan null, turn=' + map.turn);
+      if (dbgFlag('GB_EK_DEBUG')) console.error('[dbg] f25 plan null, turn=' + map.turn);
       return null;
     }
-    if (process.env.GB_EK_DEBUG) {
+    if (dbgFlag('GB_EK_DEBUG')) {
       console.error('[dbg] f25 turn=' + map.turn
         + ' calced=' + calcedThisTurn
         + ' launchTurn=' + plan.launch_turn
