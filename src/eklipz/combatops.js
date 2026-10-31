@@ -521,7 +521,7 @@
             if (!quickKill.tileList[quickKill.tileList.length - 1].isGeneral) {
               // 原版在这里用 WatchmanRouteUtils.get_watchman_path 打磨首段路径，
               // JS 侧没有该模块，所以保留原路径（打磨只影响观感与几十毫秒，不改变可达性）。
-              var wrpPath = _watchmanPath(bot, quickKill.tileList[0]);
+              var wrpPath = _watchmanPath(bot, quickKill.tileList[0], cutoffEmergence);
               if (!_isNone(wrpPath)) {
                 var closest = null;
                 var closestDist = 100;
@@ -823,10 +823,27 @@
     });
   }
 
-  // WatchmanRouteUtils 未移植：原版用它给「快杀路径」找一条更短的情报收集路线。
-  // 没有它就只能用原路径，因此这里返回 null，调用方保留原 quickKill。
-  function _watchmanPath(bot, startTile) {
-    return null;
+  // py:BotCombatOps.py:215-246 —— 用 WatchmanRouteUtils.get_watchman_path 把快杀路径的
+  // 首段换成一条「顺便揭示更多将军可能位置」的路线，20ms 预算，超时/失败都退回 null。
+  function _watchmanPath(bot, startTile, cutoffEmergence) {
+    var WRP = EK.WatchmanRouteUtils;
+    if (!WRP || typeof WRP.get_watchman_path !== 'function') return null;
+    if (!startTile) return null;
+
+    var toReveal = _targetPlayerPossibleGeneralLocations(
+      bot,
+      bot.targetPlayer,
+      cutoffEmergence
+    );
+    if (!toReveal || toReveal.length === 0) return null;
+
+    try {
+      return WRP.get_watchman_path(_map(bot), startTile, toReveal, 0.020);
+    } catch (e) {
+      // 原版这里也没有 try：它靠 timeLimit 保证返回。JS 侧求解器是按时钟截断的，
+      // 抛出来只等于「这一手不用打磨路径」，不要让它变成整回合不出招。
+      return null;
+    }
   }
 
   /* ---------------- 赛跑胜率 ---------------- */
@@ -857,10 +874,43 @@
       return 0.0;
     }
 
-    // WatchmanRouteUtils 未移植 → revealedCount / rawKillDistByTileMatrix 拿不到。
-    // 原版没有 bestRevealedPath 时正是 killChance=0.0 的分支，这里落到同一分支，
-    // 保证「缺信息」时不会伪造出一个高胜率（宁可不去斩首）。
-    return 0.0;
+    // py:BotCombatOps.py:492-528 —— 用 watchman 路线估计「在 turnsToDeath 回合内能杀到将军」的
+    // 概率；缺模块时只有 isOnlyOneSpot 分支能给出确定答案，其余落到 0（宁可不去斩首）。
+    var WRP = EK.WatchmanRouteUtils;
+    if (!WRP || typeof WRP.get_revealed_count_and_max_kill_turns_and_positive_path !== 'function') {
+      return 0.0;
+    }
+
+    var revealed = WRP.get_revealed_count_and_max_kill_turns_and_positive_path(
+      _map(bot),
+      generalHuntPath,
+      toReveal,
+      cutoffKillArmy
+    );
+    var revealedCount = revealed.revealedCount;
+    var rawKillDistByTileMatrix = revealed.killDistMap;
+    var bestRevealedPath = revealed.positivePath;
+
+    if (_isNone(bestRevealedPath)) return 0.0;
+
+    var killChance = revealedCount / toReveal.length;
+    if (_isNone(turnsToDeath)) return killChance;
+
+    var sumKill = 0.0;
+    var sumTotal = 0.0;
+    var tracker = bot.armyTracker || bot.army_tracker;
+    for (var tr = 0; tr < toReveal.length; tr++) {
+      var rvTile = toReveal[tr];
+      var emgVal = 1 + (tracker && typeof tracker.get_tile_emergence_for_player === 'function'
+        ? tracker.get_tile_emergence_for_player(rvTile, bot.targetPlayer)
+        : 0);
+      sumTotal += emgVal;
+      var killDist = rawKillDistByTileMatrix.raw[rvTile.tile_index];
+      if (killDist < turnsToDeath) sumKill += emgVal;
+    }
+
+    if (sumTotal === 0.0) return 0.0;
+    return sumKill / sumTotal;
   };
 
   // BotTargeting.get_target_player_possible_general_location_tiles_sorted 的兜底：

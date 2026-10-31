@@ -219,9 +219,15 @@
 
   // BotCombatQueries.find_large_tiles_near 的本地复刻：同目标集合外扩 dist 圈，
   // 收同队且 army >= minArmy 的格，按 army 降序取前 limit。
+  // 有 BotCombatQueries 时优先用它（原版语义：army > minArmy、可排除将军、allowTeam），
+  // 本地复刻只在模块缺失时兜底。
   function find_large_tiles_near(bot, targets, dist, forPlayer, limit, minArmy) {
     if (limit === undefined) limit = 30;
     if (minArmy === undefined) minArmy = 1;
+    var q = EK.BotCombatQueries;
+    if (q && typeof q.find_large_tiles_near === 'function') {
+      return q.find_large_tiles_near(bot, toArr(targets), dist, forPlayer, true, limit, minArmy);
+    }
     var map = mapOf(bot);
     var seen = new Set();
     var out = [];
@@ -247,8 +253,13 @@
     return out.slice(0, limit);
   }
 
-  // BotCombatQueries.count_enemy_territory_near_tile 的本地复刻
+  // BotCombatQueries.count_enemy_territory_near_tile 的本地复刻；
+  // 有 BotCombatQueries 时优先用它（原版还排除了「中立且不在敌方领地」的格）。
   function count_enemy_territory_near_tile(bot, tile, dist) {
+    var q = EK.BotCombatQueries;
+    if (q && typeof q.count_enemy_territory_near_tile === 'function') {
+      return q.count_enemy_territory_near_tile(bot, tile, dist);
+    }
     var map = mapOf(bot);
     var seen = new Set();
     var n = 0;
