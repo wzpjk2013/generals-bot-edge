@@ -28,6 +28,11 @@
   'use strict';
 
   var EK = (root.__EK = root.__EK || {});
+  /* 统一时钟取值：clock.js 装了就用它（可被 GB_EK_DET 钉死），没装回退真实时钟。
+   * 为什么不直接写 EK.clock：工具脚本加载模块的清单各不相同，写死依赖会在没加载 clock.js 的场景下直接抛。 */
+  function clockNowMs() { return EK.clock ? EK.clock.nowMs() : Date.now(); }
+  function clockNowSec() { return EK.clock ? EK.clock.nowSec() : Date.now() / 1000; }
+
 
   // Map._apply_server_patch / mapmove 用的 modifier 下标（照 base/client/map.py 的顺序）
   var MODIFIER_CITY_STATE = 8;
@@ -823,7 +828,7 @@
     this.gatherNodes = null;
     this.expansion_plan = new ExpansionPotential(0, 0, 0, null, [], 0.0, map.turn);
     this._expansion_value_matrix = null;
-    this.lastTurnStartTime = Date.now();
+    this.lastTurnStartTime = clockNowMs();
 
     if (!secondAttempt && this.viewInfo) this.viewInfo.clear_for_next_turn();
 

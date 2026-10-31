@@ -28,6 +28,11 @@
   'use strict';
 
   var EK = (root.__EK = root.__EK || {});
+  /* 统一时钟取值：clock.js 装了就用它（可被 GB_EK_DET 钉死），没装回退真实时钟。
+   * 为什么不直接写 EK.clock：工具脚本加载模块的清单各不相同，写死依赖会在没加载 clock.js 的场景下直接抛。 */
+  function clockNowMs() { return EK.clock ? EK.clock.nowMs() : Date.now(); }
+  function clockNowSec() { return EK.clock ? EK.clock.nowSec() : Date.now() / 1000; }
+
 
   // 浏览器里没有 process，直接读 process.env 会 ReferenceError 打断整回合决策。
   function dbgFlag(name) {
@@ -370,7 +375,7 @@
           return 0;
         }
       : function () {
-          return Date.now() / 1000;
+          return clockNowSec();
         };
     if (!cutoffTime) cutoffTime = now() + 1000;
 

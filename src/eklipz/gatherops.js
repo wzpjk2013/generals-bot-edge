@@ -19,6 +19,11 @@
   'use strict';
 
   var EK = (root.__EK = root.__EK || {});
+  /* 统一时钟取值：clock.js 装了就用它（可被 GB_EK_DET 钉死），没装回退真实时钟。
+   * 为什么不直接写 EK.clock：工具脚本加载模块的清单各不相同，写死依赖会在没加载 clock.js 的场景下直接抛。 */
+  function clockNowMs() { return EK.clock ? EK.clock.nowMs() : Date.now(); }
+  function clockNowSec() { return EK.clock ? EK.clock.nowSec() : Date.now() / 1000; }
+
 
   // BotGatherOps.py:34
   var GATHER_SWITCH_POINT = 150;
@@ -599,14 +604,41 @@
         false, 0, distancePriorities, priorityMatrix, skipTiles, logStuff, false);
       gatherNodes = res[3];
 
+      var depthValue = -1;
+      var depthTurns = -1;
+
       if (!gatherNodes) {
-        // 原版这里是 Gather.knapsack_depth_gather_with_values，JS 侧没有 → 走退化路径
-        noteMissing('Gather.knapsack_depth_gather_with_values');
-        gatherNodes = _fallbackGather(bot, startTiles, depth, negativeTiles, skipTiles, skipFunc, priorityMatrix);
+        /* BotGatherOps.py:549-568：gather_to_target_tiles 失败后走
+         * Gather.knapsack_depth_gather_with_values，返回 (value, turnsUsed, rootNodes)。
+         * 这两个数不是装饰：下面 pruneToValuePerTurn 要用 value 算 minGather。 */
+        var dg = EK.GatherDepthIterative && EK.GatherDepthIterative.knapsack_depth_gather_with_values;
+        if (typeof dg === 'function') {
+          var dres = dg(
+            map, startTiles, depth, -1,                    // 3 turns(=depth) 4 targetArmy
+            null, null, null,                              // 5 valueFunc 6 baseCaseFunc 7 pathValueFunc
+            negativeTiles, skipTiles, general.player(),    // 8 negativeTiles 9 skipTiles 10 searchingPlayer
+            null, skipFunc, null, priorityTiles,           // 11 priorityFunc 12 skipFunc 13 perIterationFunc 14 priorityTiles
+            false, false, false,                           // 15 ignoreStartTile 16 incrementBackward 17 preferNeutral
+            null,                                          // 18 viewInfo
+            distancePriorities, null,                      // 19 distPriorityMap 20 depthPriorityMap
+            useTrueValueGathered,                          // 21 useTrueValueGathered
+            includeGatherTreeNodesThatGatherNegative,      // 22 includeGatherTreeNodesThatGatherNegative
+            !!logStuff, false,                             // 23 shouldLog 24 useRecurse
+            priorityMatrix);                               // 25 priorityMatrix（cutoffTime 不传 = Infinity，确定性）
+          if (dres) {
+            depthValue = dres[0];
+            depthTurns = dres[1];
+            gatherNodes = dres[2];
+          }
+        } else {
+          noteMissing('Gather.knapsack_depth_gather_with_values');
+          gatherNodes = _fallbackGather(bot, startTiles, depth, negativeTiles, skipTiles, skipFunc, priorityMatrix);
+        }
       }
 
       if (gatherNodes && pruneToValuePerTurn) {
-        gatherNodes = pruneFallback(bot, gatherNodes, includeGatherTreeNodesThatGatherNegative);
+        gatherNodes = pruneFallback(bot, gatherNodes, includeGatherTreeNodesThatGatherNegative,
+          depthValue, includeGatherTreeNodesThatGatherNegative);
       }
 
       if (gatherNodes) {
@@ -624,14 +656,32 @@
     return null;
   }
 
-  // gatherNodes 的退化 prune：原版 prune_mst_to_max_army_per_turn_with_values 不在 JS 里，
-  // 用 prune_mst_to_turns 近似（按回合数剪枝，而不是按每回合最大收益剪枝）。
-  function pruneFallback(bot, gatherNodes, includeNegative) {
-    noteMissing('Gather.prune_mst_to_max_army_per_turn_with_values');
-    if (!includeNegative && gatherNodes) {
-      // allowNegative=False 的语义：负收益叶子应当剪掉，这里靠 prune_mst_to_turns 的默认行为
+  /* BotGatherOps.py:570-591 的 pruneToValuePerTurn 分支。
+   * 原版这里必须知道「gather 一共产出多少价值」才能定 minGather（value//3，守经济时 4*value//5），
+   * 所以调用方要把 knapsack_depth_gather_with_values 的第一个返回值送进来。 */
+  function pruneFallback(bot, gatherNodes, includeNegative, gatheredValue, allowNegative) {
+    if (!gatherNodes) return gatherNodes;
+    var prune = EK.GatherPrune && EK.GatherPrune.prune_mst_to_max_army_per_turn_with_values;
+    if (typeof prune !== 'function') {
+      noteMissing('Gather.prune_mst_to_max_army_per_turn_with_values');
+      return gatherNodes;
     }
-    return gatherNodes;
+    var map = mapOf(bot);
+    var general = generalOf(bot);
+    var value = (typeof gatheredValue === 'number' && gatheredValue > 0) ? gatheredValue : 0;
+    var minGather = Math.floor(value / 4);
+    if (bot.defend_economy) minGather = Math.floor(4 * value / 5);
+    /* preferPrune：py 把所有兵<=1 的自有格塞进 set，让剪枝优先砍这些「没兵的空壳」 */
+    var prefer = new Set();
+    var myTiles = map.players[general.player()] ? map.players[general.player()].tiles : [];
+    for (var i = 0; i < myTiles.length; i++) {
+      if (myTiles[i].army <= 1) prefer.add(myTiles[i]);
+    }
+    var allowNeg = allowNegative === undefined ? includeNegative : allowNegative;
+    var res = prune(gatherNodes, minGather, general.player(), map.get_teams_array(map),
+      0, null, true, null, null, prefer, !!allowNeg, true, 0);
+    if (!res) return gatherNodes;
+    return res[2];
   }
 
   // 缺失原语时的统一退化：本文件的 build_mst 已按 Python 语义实现，直接拿来用。
@@ -807,7 +857,7 @@
       }
     }
 
-    var startTime = Date.now();
+    var startTime = clockNowMs();
     var avoidSet = avoidTiles ? (avoidTiles instanceof Set ? avoidTiles : new Set(toArr(avoidTiles))) : null;
 
     function default_priority_func(nextTile, currentPriorityObject) {
@@ -1099,7 +1149,28 @@
     return move;
   }
 
-  // BotGatherOps.py:1035 get_gather_to_target_tiles
+  /* BotGatherOps.py:1216-1225：maximizeArmyGatheredPerTurn 分支。
+   * 注意 preferPrune 用的是 expansion_plan.preferred_tiles（不是「兵<=1 的自有格」），
+   * 且传了 additionalIncrement —— 这两点与 pruneFallback 的用法不同，别合并。 */
+  function _pruneToMaxArmyPerTurn(bot, gatherNodes, targetArmy, additionalIncrement, includeNegative, minTurns) {
+    if (!gatherNodes) return gatherNodes;
+    var prune = EK.GatherPrune && EK.GatherPrune.prune_mst_to_max_army_per_turn_with_values;
+    if (typeof prune !== 'function') {
+      noteMissing('Gather.prune_mst_to_max_army_per_turn_with_values');
+      return gatherNodes;
+    }
+    var map = mapOf(bot);
+    var general = generalOf(bot);
+    var prefer = (bot.expansion_plan && bot.expansion_plan.preferred_tiles)
+      ? bot.expansion_plan.preferred_tiles : null;
+    var res = prune(gatherNodes, targetArmy, general.player(), map.get_teams_array(map),
+      additionalIncrement, null, true, null, null, prefer,
+      includeNegative === undefined ? true : !!includeNegative, true, minTurns);
+    if (!res) return gatherNodes;
+    return res[2];
+  }
+
+
   function get_gather_to_target_tiles(bot, targets, maxTime, gatherTurns, negativeSet, targetArmy,
     useTrueValueGathered, leafMoveSelectionValueFunc, includeGatherTreeNodesThatGatherNegative,
     maximizeArmyGatheredPerTurn, additionalIncrement, distPriorityMap, priorityMatrix, skipTiles,
@@ -1119,28 +1190,84 @@
 
     var gatherNodes = null;
 
+    /* BotGatherOps.py:1147-1148 —— 这段在分支之前，原版一直有；
+     * JS 早先收了 additionalIncrement 却从没用过，等于调用方传的增量被静默吞掉。 */
+    if (additionalIncrement !== 0 && targetArmy > 0) {
+      targetArmy = targetArmy + Math.floor(additionalIncrement * gatherTurns / 2);
+    }
+
     if (bot.gather_use_pcst && gatherTurns > 0 && targetArmy < 0 && !isDict) {
-      // 原版走 Gather.gather_approximate_turns_to_tiles（JS 侧未移植）
-      noteMissing('Gather.gather_approximate_turns_to_tiles');
-      gatherNodes = _fallbackGather(bot, targets, gatherTurns, negativeSet, skipTiles, null, priorityMatrix);
+      /* BotGatherOps.py:1064-1082：Gather.gather_approximate_turns_to_tiles 返回 GatherCapturePlan，
+       * 调用方只取 plan.root_nodes。 */
+      var gu = EK.GatherUtils && EK.GatherUtils.gather_approximate_turns_to_tiles;
+      var capPlan = null;
+      if (typeof gu === 'function') {
+        capPlan = gu(map, targets, gatherTurns, general.player(), null, priorityMatrix, priorityMatrix,
+          negativeSet, skipTiles, false, useTrueValueGathered, true, true, !!shouldLog, null);
+      }
+      if (capPlan && capPlan.root_nodes) {
+        gatherNodes = capPlan.root_nodes;
+      } else {
+        noteMissing('Gather.gather_approximate_turns_to_tiles');
+        gatherNodes = _fallbackGather(bot, targets, gatherTurns, negativeSet, skipTiles, null, priorityMatrix);
+      }
     } else if (gatherTurns > GATHER_SWITCH_POINT) {
       gatherNodes = build_mst(bot, targets, maxTime, gatherTurns - 1, negativeSet);
       if (!gatherNodes || gatherNodes.length === 0) return [null, -1, -1, null];
       EK.Gather.prune_mst_to_turns(gatherNodes, gatherTurns - 1, general.player(), map.teams, map.turn);
     } else if (bot.gather_use_max_set && !isDict) {
-      // 原版走 Gather.gather_max_set_iterative_plan（JS 侧未移植）
-      noteMissing('Gather.gather_max_set_iterative_plan');
-      gatherNodes = _fallbackGather(bot, targets, gatherTurns, negativeSet, skipTiles, null, priorityMatrix);
+      /* BotGatherOps.py:1150-1195：Gather.gather_max_set_iterative_plan，两个矩阵由
+       * build_gather_capture_pure_value_matrix 现场造（value 版 / army 成本版）。 */
+      var maxSet = EK.GatherMaxSet && EK.GatherMaxSet.gather_max_set_iterative_plan;
+      var plan = null;
+      if (typeof maxSet === 'function') {
+        var gatherMatrix = get_gather_tiebreak_matrix(bot);
+        var captureMatrix = EK.BotExpansionOps && EK.BotExpansionOps.get_expansion_weight_matrix
+          ? EK.BotExpansionOps.get_expansion_weight_matrix(bot) : null;
+        var valueMatrix = EK.Gather.build_gather_capture_pure_value_matrix(map, general.player(), negativeSet,
+          gatherMatrix, captureMatrix, useTrueValueGathered, false);
+        var armyCostMatrix = EK.Gather.build_gather_capture_pure_value_matrix(map, general.player(), negativeSet,
+          gatherMatrix, captureMatrix, true, false);
+        plan = maxSet(map, targets, gatherTurns, valueMatrix, armyCostMatrix,
+          null, null, null, null, skipTiles,              // 6..10
+          general.player(), null, null, null, null,       // 11..15
+          false, true, false, null, null,                 // 16..20
+          false, !!shouldLog, undefined, true, false,     // 21..25 (cutoffTime 不传 = Infinity)
+          false, !!maximizeArmyGatheredPerTurn, useTrueValueGathered); // 26..28
+      }
+      if (plan && plan.root_nodes) {
+        gatherNodes = plan.root_nodes;
+      } else {
+        noteMissing('Gather.gather_max_set_iterative_plan');
+        gatherNodes = _fallbackGather(bot, targets, gatherTurns, negativeSet, skipTiles, null, priorityMatrix);
+      }
     } else {
-      // 原版走 Gather.knapsack_max_gather（JS 侧未移植）
-      noteMissing('Gather.knapsack_max_gather');
-      gatherNodes = _fallbackGather(bot, targets, gatherTurns, negativeSet, skipTiles, null, priorityMatrix);
+      /* BotGatherOps.py:1196-1214：Gather.knapsack_max_gather 直接返回 GatherTreeNode[]。 */
+      var kmg = EK.GatherMaxIterative && EK.GatherMaxIterative.knapsack_max_gather;
+      if (typeof kmg === 'function') {
+        gatherNodes = kmg(map, targets, gatherTurns, targetArmy,
+          null, null,                                     // 5 valueFunc 6 baseCaseFunc
+          negativeSet, skipTiles, general.player(),       // 7 negativeTiles 8 skipTiles 9 searchingPlayer
+          null, null, null,                               // 10 priorityFunc 11 skipFunc 12 priorityTiles
+          true, false, false,                             // 13 ignoreStartTile 14 incrementBackward 15 preferNeutral
+          null, distPriorityMap,                          // 16 viewInfo 17 distPriorityMap
+          useTrueValueGathered,                           // 18
+          includeGatherTreeNodesThatGatherNegative,       // 19
+          priorityMatrix,                                 // 20
+          undefined,                                      // 21 cutoffTime = Infinity（确定性）
+          !!shouldLog, !!fastMode);                       // 22 shouldLog 23 fastMode
+      }
+      if (!gatherNodes || gatherNodes.length === 0) {
+        noteMissing('Gather.knapsack_max_gather');
+        gatherNodes = _fallbackGather(bot, targets, gatherTurns, negativeSet, skipTiles, null, priorityMatrix);
+      }
     }
 
     if (!gatherNodes || gatherNodes.length === 0) return [null, -1, -1, null];
 
     if (maximizeArmyGatheredPerTurn) {
-      gatherNodes = pruneFallback(bot, gatherNodes, includeGatherTreeNodesThatGatherNegative);
+      gatherNodes = _pruneToMaxArmyPerTurn(bot, gatherNodes, targetArmy, additionalIncrement,
+        includeGatherTreeNodesThatGatherNegative, minTurnsForMaxArmyGatheredPerTurn);
     }
 
     var totalValue = 0;

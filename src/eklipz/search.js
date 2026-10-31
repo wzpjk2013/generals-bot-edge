@@ -24,6 +24,11 @@
   'use strict';
 
   var EK = (root.__EK = root.__EK || {});
+  /* 统一时钟取值：clock.js 装了就用它（可被 GB_EK_DET 钉死），没装回退真实时钟。
+   * 为什么不直接写 EK.clock：工具脚本加载模块的清单各不相同，写死依赖会在没加载 clock.js 的场景下直接抛。 */
+  function clockNowMs() { return EK.clock ? EK.clock.nowMs() : Date.now(); }
+  function clockNowSec() { return EK.clock ? EK.clock.nowSec() : Date.now() / 1000; }
+
 
   var UNREACHABLE = 1000;
   var INF = Infinity;
@@ -1738,7 +1743,7 @@
       }
     }
 
-    var startTime = Date.now();
+    var startTime = clockNowMs();
     var iter = 0;
     var foundDist = 1000;
     var maxTime = opt(opts, 'maxTime', 0.2);
@@ -1752,7 +1757,7 @@
     while (!frontier.empty) {
       iter += 1;
       if ((iter & 63) === 0) {
-        if ((Date.now() - startTime) / 1000 > maxTime || iter > maxIterations) break;
+        if ((clockNowMs() - startTime) / 1000 > maxTime || iter > maxIterations) break;
       }
 
       var node = frontier.get();
@@ -2012,7 +2017,7 @@
       }
     }
 
-    var startTime = Date.now();
+    var startTime = clockNowMs();
     var iter = 0;
     var foundDist = 1000;
     var endNode = null;
@@ -2021,7 +2026,7 @@
 
     while (!frontier.empty) {
       iter += 1;
-      if ((iter & 128) === 0 && (Date.now() - startTime) / 1000 > opt(opts, 'maxTime', 0.2)) break;
+      if ((iter & 128) === 0 && (clockNowMs() - startTime) / 1000 > opt(opts, 'maxTime', 0.2)) break;
       if (iter > maxIterations) break;
 
       var node = frontier.get();
@@ -2221,7 +2226,7 @@
       }
     }
 
-    var startTime = Date.now();
+    var startTime = clockNowMs();
     var iter = 0;
     var foundDist = 1000;
     var maxValues = new Map();
@@ -2231,7 +2236,7 @@
     while (!frontier.empty) {
       iter += 1;
       if (iter >= maxIterations) break;
-      if ((iter & 64) === 0 && (Date.now() - startTime) / 1000 > opt(opts, 'maxTime', 0.2)) break;
+      if ((iter & 64) === 0 && (clockNowMs() - startTime) / 1000 > opt(opts, 'maxTime', 0.2)) break;
 
       var node = frontier.get();
       var prioVals = node[0];
@@ -2406,14 +2411,14 @@
       }
     }
 
-    var startTime = Date.now();
+    var startTime = clockNowMs();
     var iter = 0;
     var foundDist = 1000;
 
     while (!frontier.empty) {
       iter += 1;
       if ((iter & 63) === 0) {
-        if ((Date.now() - startTime) / 1000 > opt(opts, 'maxTime', 0.2) || iter > maxIterations) break;
+        if ((clockNowMs() - startTime) / 1000 > opt(opts, 'maxTime', 0.2) || iter > maxIterations) break;
       }
 
       var node = frontier.get();

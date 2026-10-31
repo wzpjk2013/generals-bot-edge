@@ -28,6 +28,11 @@
   'use strict';
 
   var EK = (root.__EK = root.__EK || {});
+  /* 统一时钟取值：clock.js 装了就用它（可被 GB_EK_DET 钉死），没装回退真实时钟。
+   * 为什么不直接写 EK.clock：工具脚本加载模块的清单各不相同，写死依赖会在没加载 clock.js 的场景下直接抛。 */
+  function clockNowMs() { return EK.clock ? EK.clock.nowMs() : Date.now(); }
+  function clockNowSec() { return EK.clock ? EK.clock.nowSec() : Date.now() / 1000; }
+
 
   /* 原版 DebugHelper.IS_DEBUGGING / DEBUG_ASSERTS / ALLOW_RANDOM_SKIPS */
   var DEBUG_ASSERTS = false;
@@ -1431,6 +1436,7 @@
   }
   function nowSeconds() {
     if (_fixedNow !== null) return _fixedNow;
+    if (EK.clock && EK.clock.isFixed()) return clockNowSec();
     return Date.now() / 1000;
   }
   // cutoff 为 null 表示「不给时间预算」。不能拿它直接跟 now 比：JS 里 null→0，

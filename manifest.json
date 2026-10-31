@@ -19,6 +19,7 @@
       "world": "MAIN",
       "js": [
         "src/eklipz/pyrandom.js",
+        "src/eklipz/clock.js",
         "src/eklipz/tile.js",
         "src/eklipz/mapmatrix.js",
         "src/eklipz/search.js",
@@ -40,6 +41,9 @@
         "src/eklipz/watchmanroute.js",
         "src/eklipz/gatherprune.js",
         "src/eklipz/botqueries.js",
+        "src/eklipz/gathermax.js",
+        "src/eklipz/fastdisjointset.js",
+        "src/eklipz/gatherutils.js",
         "src/eklipz/expandutils.js",
         "src/eklipz/earlyexpandutils.js",
         "src/eklipz/timings.js",

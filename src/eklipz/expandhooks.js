@@ -26,6 +26,11 @@
  * ===================================================================== */
 (function (root) {
   var EK = (root.__EK = root.__EK || {});
+  /* 统一时钟取值：clock.js 装了就用它（可被 GB_EK_DET 钉死），没装回退真实时钟。
+   * 为什么不直接写 EK.clock：工具脚本加载模块的清单各不相同，写死依赖会在没加载 clock.js 的场景下直接抛。 */
+  function clockNowMs() { return EK.clock ? EK.clock.nowMs() : Date.now(); }
+  function clockNowSec() { return EK.clock ? EK.clock.nowSec() : Date.now() / 1000; }
+
 
   function mapOf(bot) {
     return (bot && (bot._map || bot.map)) || null;
@@ -89,7 +94,7 @@
       var cutoffTime = null;
       if (timeLimit !== undefined && timeLimit !== null) {
         var nowFn = EK.EarlyExpandUtils && EK.EarlyExpandUtils._now_seconds;
-        var now = typeof nowFn === 'function' ? nowFn() : Date.now() / 1000;
+        var now = typeof nowFn === 'function' ? nowFn() : clockNowSec();
         cutoffTime = now + timeLimit;
       }
       var pruneCutoff = -1;

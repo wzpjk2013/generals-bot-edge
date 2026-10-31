@@ -55,6 +55,9 @@ function buildMap(caseData) {
     t.delta = null;
     t.lastSeen = 0;
     t.parent = null;
+    // _recalc_derived 用 overridePathable !== null 判定「被强制可通行」，
+    // 桩对象漏掉这一位会让每个格子都变成 notPathable。
+    t.overridePathable = null;
     tiles[t.tile_index] = t;
   }
   for (let i = 0; i < caseData.tiles.length; i++) {

@@ -27,11 +27,11 @@ const MAX_TURNS = 1200;
 
 /* 装载顺序 = 依赖顺序：底层的先来。botmain 最后（它 _call 找 EK.* 上的兄弟模块）。 */
 const MODULES = [
-  'pyrandom',
+  'pyrandom', 'clock',
   'tile', 'mapmatrix', 'search', 'path', 'map', 'mapmove', 'nx',
   'armyanalyzer', 'territory', 'board', 'danger', 'city',
   'armytracker', 'opponenttracker', 'tileisland', 'gather', 'mapspanning', 'watchman',
-  'gatherprune', 'botqueries', 'watchmanroute',
+  'gatherprune', 'botqueries', 'watchmanroute', 'gathermax', 'fastdisjointset', 'gatherutils',
   'expandutils', 'earlyexpandutils', 'expansionops', 'combatops', 'gatherops',
   'targeting', 'interceptor', 'defense', 'centraldefense', 'eventhandlers', 'pathing', 'repetition', 'statequeries',
   'timings', 'killtiming', 'cityops', 'wincondition', 'comms', 'rendering',

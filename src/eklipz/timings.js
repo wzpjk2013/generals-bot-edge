@@ -19,6 +19,11 @@
   'use strict';
 
   var EK = (root.__EK = root.__EK || {});
+  /* 统一时钟取值：clock.js 装了就用它（可被 GB_EK_DET 钉死），没装回退真实时钟。
+   * 为什么不直接写 EK.clock：工具脚本加载模块的清单各不相同，写死依赖会在没加载 clock.js 的场景下直接抛。 */
+  function clockNowMs() { return EK.clock ? EK.clock.nowMs() : Date.now(); }
+  function clockNowSec() { return EK.clock ? EK.clock.nowSec() : Date.now() / 1000; }
+
 
   function mapOf(bot) { return bot._map || bot.map; }
 
@@ -121,7 +126,7 @@
 
   // 原版 DebugHelper.IS_DEBUGGING 只在挂调试器时为真；这里固定假。
   BotTimings.IS_DEBUGGING = false;
-  BotTimings.now = function () { return Date.now(); };
+  BotTimings.now = function () { return clockNowMs(); };
   // py BotTimings.py:389 是 `random.randint(-2, 2)`（走 getrandbits，不是 random()），
   // 所以这里默认接 EK.rng（MT19937 逐位复刻 random.seed(0)），对拍才能逐回合一致。
   BotTimings.rng = function () {

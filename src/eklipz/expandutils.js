@@ -4,6 +4,11 @@
   'use strict';
 
   var EK = (root.__EK = root.__EK || {});
+  /* 统一时钟取值：clock.js 装了就用它（可被 GB_EK_DET 钉死），没装回退真实时钟。
+   * 为什么不直接写 EK.clock：工具脚本加载模块的清单各不相同，写死依赖会在没加载 clock.js 的场景下直接抛。 */
+  function clockNowMs() { return EK.clock ? EK.clock.nowMs() : Date.now(); }
+  function clockNowSec() { return EK.clock ? EK.clock.nowSec() : Date.now() / 1000; }
+
 
   // ExpandUtils 从 ArmyInterceptor 导入的常量（ArmyInterceptor.py:28/30）
   var TARGET_CAP_VALUE = 2.1;
@@ -484,7 +489,7 @@
     defaultNoPathValue, threatBlockingTiles, turns, lengthWeightOffset, includeExtraGenAndCityArmy) {
 
     var remainingTurns = turns;
-    var startTime = Date.now();
+    var startTime = clockNowMs();
 
     var targetTeam = -1;
     if (targetPlayer >= 0) targetTeam = map.players[targetPlayer].team;
@@ -737,7 +742,7 @@
 
       if (sortedByArmyTiles.length === 0) break;
 
-      var timeUsed = (Date.now() - startTime) / 1000;
+      var timeUsed = (clockNowMs() - startTime) / 1000;
       if (timeUsed > breakStage && inStage2) break;
       if (timeUsed > stage2) {
         inStage2 = true;

@@ -31,11 +31,11 @@ const flag = (name) => process.argv.includes('--' + name);
 
 const ROOT = path.join(__dirname, '..', 'src', 'eklipz');
 const MODULES = [
-  'pyrandom',
+  'pyrandom', 'clock',
   'tile', 'mapmatrix', 'search', 'path', 'map', 'mapmove', 'nx',
   'armyanalyzer', 'territory', 'board', 'danger', 'city',
   'armytracker', 'opponenttracker', 'tileisland', 'gather', 'mapspanning', 'watchman',
-  'gatherprune', 'botqueries', 'watchmanroute',
+  'gatherprune', 'botqueries', 'watchmanroute', 'gathermax', 'fastdisjointset', 'gatherutils',
   'expandutils', 'earlyexpandutils', 'timings', 'killtiming',
   'expansionops', 'combatops', 'gatherops', 'cityops', 'targeting',
   'interceptor', 'defense', 'explorationops', 'centraldefense', 'eventhandlers',

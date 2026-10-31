@@ -35,6 +35,11 @@
   'use strict';
 
   var EK = (root.__EK = root.__EK || {});
+  /* 统一时钟取值：clock.js 装了就用它（可被 GB_EK_DET 钉死），没装回退真实时钟。
+   * 为什么不直接写 EK.clock：工具脚本加载模块的清单各不相同，写死依赖会在没加载 clock.js 的场景下直接抛。 */
+  function clockNowMs() { return EK.clock ? EK.clock.nowMs() : Date.now(); }
+  function clockNowSec() { return EK.clock ? EK.clock.nowSec() : Date.now() / 1000; }
+
 
   // 浏览器里没有 process，裸读 process.env 会 ReferenceError，打断整回合决策。
   function dbgFlag(name) {
@@ -46,6 +51,130 @@
   }
   var WRP_DEBUG = dbgFlag('GB_WATCHMANROUTE_DEBUG') === '1';
 
+  /* ---------------- 耗时统计（GB_PERF=1 才记账） ---------------- */
+
+  /*
+   * 只在开关打开时累加，关掉时所有记账点都是常数级判断，不留额外分配。
+   * 累计到 EK.perf 上而不是逐次打印：跑批时 stdout 会被别的模块解析。
+   */
+  var PERF_ON = dbgFlag('GB_PERF') === '1';
+
+  function perf() {
+    var p = EK.perf;
+    if (!p) {
+      p = EK.perf = {
+        wrpMs: 0,
+        wrpCalls: 0,
+        wrpMaxMs: 0,
+        wrpIters: 0,
+        wrpMaxIters: 0,
+        wrpItersCut: 0,
+        revealMs: 0,
+        revealCalls: 0,
+        revealMaxMs: 0
+      };
+    }
+    return p;
+  }
+
+  function perfStart() {
+    return PERF_ON ? Date.now() : 0;
+  }
+
+  function perfRecordWrp(t0, iters) {
+    if (!PERF_ON) return;
+    var p = perf();
+    var ms = Date.now() - t0;
+    p.wrpMs += ms;
+    p.wrpCalls += 1;
+    if (ms > p.wrpMaxMs) p.wrpMaxMs = ms;
+    p.wrpIters += iters;
+    if (iters > p.wrpMaxIters) p.wrpMaxIters = iters;
+    if (iters >= wrpMaxIter()) p.wrpItersCut += 1;
+  }
+
+  function perfRecordReveal(t0) {
+    if (!PERF_ON) return;
+    var p = perf();
+    var ms = Date.now() - t0;
+    p.revealMs += ms;
+    p.revealCalls += 1;
+    if (ms > p.revealMaxMs) p.revealMaxMs = ms;
+  }
+
+  // 退出时打一行汇总（只打一行，不参与跑批解析）。
+  if (PERF_ON && typeof process !== 'undefined' && process.once) {
+    process.once('exit', function () {
+      var p = perf();
+      console.log(
+        '[wrp-perf] wrp calls ' +
+          p.wrpCalls +
+          ' totalMs ' +
+          p.wrpMs +
+          ' maxMs ' +
+          p.wrpMaxMs +
+          ' avgIters ' +
+          (p.wrpCalls ? Math.round(p.wrpIters / p.wrpCalls) : 0) +
+          ' maxIters ' +
+          p.wrpMaxIters +
+          ' iterCapped ' +
+          p.wrpItersCut +
+          ' | reveal calls ' +
+          p.revealCalls +
+          ' totalMs ' +
+          p.revealMs +
+          ' maxMs ' +
+          p.revealMaxMs
+      );
+    });
+  }
+
+  /* ---------------- 迭代上限（确定性截断） ---------------- */
+
+  /*
+   * 为什么按迭代数而不是按时钟截断：按时钟截断会让同一局两次运行解出不同路线，
+   * 破坏回放比对。迭代次数与输入一一对应，截断点因此是确定的。
+   *
+   * 默认 950000 = gm1 回放里观测到的单次最大展开数 613796 × 1.5。
+   * 线上若发现更大的合法用例，用 GB_WRP_MAXITER 抬高即可。
+   */
+  var DEFAULT_WRP_MAX_ITER = 950000;
+
+  // 单次迭代的实测均耗（ms）：gm1 里 12764ms / 613796 次 ≈ 0.021ms。
+  var WRP_MS_PER_ITER = 0.021;
+
+  // 线上形态的 timeLimit（0.02s 量级）才做规模压缩；回放/冻结时钟（timeLimit 很大）
+  // 必须完整展开，否则会用截断的最优冒充真最优，把回放比对搞坏。
+  var WRP_SCALE_LIMIT_MIN_TIME = 10.0;
+  // 压缩后仍允许的最小展开量；实测生产里每回合的 watchman 也就千级展开。
+  var WRP_SCALE_FLOOR = 2000;
+
+  function wrpMaxIter() {
+    var raw = dbgFlag('GB_WRP_MAXITER');
+    if (raw !== undefined && raw !== null && raw !== '') {
+      var v = parseInt(raw, 10);
+      if (isFinite(v) && v > 0) return v;
+    }
+    return DEFAULT_WRP_MAX_ITER;
+  }
+
+  /*
+   * 按候选规模线性预估展开量：待看格数 × 可通行格数 是搜索空间的上界量级。
+   * 生产形态（timeLimit 小）下把上限压到「预估量」与「预算能付得起的迭代数」的较小者，
+   * 避免一次求解吃掉整回合；回放形态（timeLimit 大）只受 wrpMaxIter 约束。
+   */
+  function estimateMaxIter(toDiscoverCount, pathableCount, timeLimitSec) {
+    var cap = wrpMaxIter();
+    if (dbgFlag('GB_WRP_MEASURE') === '1') return cap;
+    if (!(timeLimitSec > 0) || timeLimitSec >= WRP_SCALE_LIMIT_MIN_TIME) return cap;
+    var scale = toDiscoverCount * Math.max(1, pathableCount);
+    // 每 16 个「待看格 × 格数」大约对应 1 次展开（从回放拟合的保守上界：实际远低于此）。
+    var scaledIters = Math.ceil(scale / 16);
+    var budgetIters = Math.floor((timeLimitSec * 1000) / WRP_MS_PER_ITER);
+    var limit = Math.min(cap, Math.max(WRP_SCALE_FLOOR, Math.min(scaledIters, budgetIters)));
+    return limit > 0 ? limit : cap;
+  }
+
   // 原版 PivotWRP.longest_crossing 的初值；connect_graph 不跑，所以恒等于它。
   var LONGEST_CROSSING = 20;
 
@@ -54,8 +183,14 @@
   /*
    * 原版 unseen 是 set[Tile]，节点去重靠 hash((tile_index, tuple(unseen)))。逐位复刻
    * 「tuple 迭代序进哈希」会让每个节点都重建一次 set 并做一次表序模拟，实测单次求解
-   * 从几百毫秒涨到 14 秒（bot 每回合只有几十毫秒预算），而实测它并不改变出解 ——
-   * 所以这里用位图 + 位串签名：同一批待看格 → 同一签名，代价 O(词数)。
+   * 从几百毫秒涨到 14 秒（bot 每回合只有几十毫秒预算），而实测它并不改变出解长度。
+   *
+   * 代价（已知且接受）：Python 的 set 迭代序取决于该 set 的扩容历史，因此「tile 相同、
+   * 待看格成员完全相同、但构造历史不同」的两个节点在 Python 里 hash 不等、被当成两个
+   * 节点各展开一遍；这里按成员集合去重，会把第二个当成已访问而跳过。实测差异只落在
+   * (f, cost) 完全相等的并列路线上（gm1 turn75/turn90），长度不变。
+   *
+   * 注意：出堆次序**不**依赖位图遍历序 —— 见 heapLess 的注释。
    */
   function Unseen(wordCount) {
     this.words = new Uint32Array(wordCount);
@@ -191,6 +326,10 @@
   // Python 比较的是元组 (total_estimated_cost, node)，node.__lt__ 是
   // (total, 0 - cost_so_far)；两者全等时 __lt__ 双向皆假。刻意不加序号，
   // 靠复刻 sift 顺序（相等时把右孩子往上提）拿到同样的出堆次序。
+  //
+  // 出堆次序因此只由三件事决定：total / negCost / **入堆顺序**。而入堆顺序来自
+  // tile.movable 的迭代序（map.js 与 base/client/map.py:1150-1191 同序）与
+  // shortcut 的 component 判定，都不依赖位图遍历序。位图只影响节点去重（见 Unseen 注释）。
   function heapLess(a, b) {
     if (a.total !== b.total) return a.total < b.total;
     return a.negCost < b.negCost;
@@ -548,7 +687,7 @@
     var now = this._now
       ? this._now
       : function () {
-          return Date.now() / 1000;
+          return clockNowSec();
         };
     if (!cutoffTime) cutoffTime = now() + 1000;
 
@@ -694,7 +833,7 @@
     var now = this._now
       ? this._now
       : function () {
-          return Date.now() / 1000;
+          return clockNowSec();
         };
     if (!cutoffTime) cutoffTime = now() + 1000;
 
@@ -710,8 +849,16 @@
     var quickIterCutoff = Math.max(0.003, (cutoffTime - start) * 0.1);
     var nextIterCutoffTime = Math.min(cutoffTime, start + Math.min(start + 1.0, quickIterCutoff));
     var iterations = 0;
+    // 确定性截断：按迭代数，不按时钟。到上限就带着当前最优返回。
+    var maxIter = estimateMaxIter(
+      this.to_discover.length,
+      this.map.pathable_tiles ? this.map.pathable_tiles.length : this.tile_count,
+      cutoffTime - start
+    );
+    var hitIterCap = false;
 
     while (w >= 1.0 && cutoffTime >= now()) {
+      if (hitIterCap) break;
       var startNode = new FrontierAStarNode(
         this.start,
         unseenFromTiles(this.to_discover, tileCount),
@@ -728,6 +875,10 @@
       var lenThreshs = rebuildLenThreshs(cutoffThresh, w);
 
       while (openList.size() > 0) {
+        if (iterations >= maxIter) {
+          hitIterCap = true;
+          break;
+        }
         iteration += 1;
         iterations += 1;
         var popped = openList.pop();
@@ -737,17 +888,6 @@
         if (closedSet.has(currentNode.key())) continue;
 
         var unseenCount = currentNode.unseen.count;
-
-        var tr = typeof globalThis !== 'undefined' ? globalThis.__WR_TRACE : null;
-        if (tr && tr.on && tr.pops.length < 400) {
-          tr.pops.push([
-            tr.pops.length + 1,
-            currentNode.tile.tile_index,
-            currentNode.cost_so_far,
-            popped.total,
-            unseenCount
-          ]);
-        }
 
         if (unseenCount < bestUnseen) {
           bestTurns = currentNode.path.length - 1;
@@ -804,16 +944,7 @@
             0
           );
 
-          if (closedSet.has(neighborNode.key())) {
-            var tr3 = typeof globalThis !== 'undefined' ? globalThis.__WR_TRACE : null;
-            if (tr3 && tr3.on) {
-              tr3.closedSkips = tr3.closedSkips || [];
-              if (tr3.closedSkips.length < 200) {
-                tr3.closedSkips.push([neighborNode.tile.tile_index, neighborNode.cost_so_far, neighborNode.unseen.count]);
-              }
-            }
-            continue;
-          }
+          if (closedSet.has(neighborNode.key())) continue;
 
           neighborNode.heuristic_cost_remaining = this.heuristic(neighborNode) * w;
           neighborNode.total_estimated_cost =
@@ -822,16 +953,6 @@
           var thresh = lenThreshs[neighborNode.cost_so_far];
           // 原版这里会 IndexError（假定 cost 不超过 cutoffThresh+1）；越界当不剪枝
           if (thresh !== undefined && neighborNode.total_estimated_cost >= thresh) continue;
-
-          var tr2 = typeof globalThis !== 'undefined' ? globalThis.__WR_TRACE : null;
-          if (tr2 && tr2.on && tr2.pushes.length < 400) {
-            tr2.pushes.push([
-              tr2.pushes.length + 1,
-              neighborNode.tile.tile_index,
-              neighborNode.cost_so_far,
-              neighborNode.total_estimated_cost
-            ]);
-          }
 
           openList.push(
             new HeapEntry(neighborNode.total_estimated_cost, -neighborNode.cost_so_far, neighborNode)
@@ -842,6 +963,9 @@
       w = w - 0.5;
       nextIterCutoffTime = cutoffTime;
     }
+
+    this.last_iterations = iterations;
+    this.last_hit_iter_cap = hitIterCap;
 
     if (WRP_DEBUG) {
       console.log(
@@ -885,8 +1009,10 @@
     });
 
     var startTime = deterministicTime ? 0 : Date.now() / 1000;
+    var perfT0 = perfStart();
     var wrp = new PivotIterativeWRP(map, startTile, tiles, initialArmy, deterministicTime);
     var path = wrp.solve(startTime + timeLimit);
+    perfRecordWrp(perfT0, wrp.last_iterations || 0);
 
     if (WRP_DEBUG) {
       console.log(
@@ -928,6 +1054,13 @@
     cutoffKillArmy,
     maxKillTurnsDistanceOffsetCutoff
   ) {
+    var perfT0 = perfStart();
+    var out = _revealedCore(map, path, toReveal, cutoffKillArmy, maxKillTurnsDistanceOffsetCutoff);
+    perfRecordReveal(perfT0);
+    return out;
+  }
+
+  function _revealedCore(map, path, toReveal, cutoffKillArmy, maxKillTurnsDistanceOffsetCutoff) {
     if (cutoffKillArmy === undefined || cutoffKillArmy === null) cutoffKillArmy = 0;
     if (maxKillTurnsDistanceOffsetCutoff === undefined || maxKillTurnsDistanceOffsetCutoff === null) {
       maxKillTurnsDistanceOffsetCutoff = 15;
