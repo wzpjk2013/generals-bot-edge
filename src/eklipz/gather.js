@@ -36,11 +36,21 @@
  *     原版 untilFunc 恒返回 True，一个节点都不会被剪（见 GatherPrune.py:423 的
  *     `armyLeftIfPruned < army`），所以这里按「army 阈值」实现，行为在该调用点上
  *     与原版逐字节等价。真要按 army 剪到别的值，需要补回城市计数。
- *  5. 日志 / viewInfo / renderLive / FastDisjointTileSetSum / 计时 cutoff 全部丢掉，
- *     这些只影响观感与超时，不影响任何一条走子。
+ *  5. 日志 / viewInfo / renderLive / 计时 cutoff 全部丢掉，
+ *     这些只影响观感与超时，不影响任何一条走子。（FastDisjointTileSetSum 原本也在
+ *     丢掉之列，第 7 条的集合式剪枝要用，已经补回来了。）
  *  6. 原版 `_prune_bad`、`build_mst_to_root_from_path_and_contiguous_tiles`、
  *     `recalculate_tree_values*`、`prune_mst_to_tiles`、`prune_mst_to_max_army_per_turn`
  *     没搬：前两个只被跳过路径调用，后几个是给 bot 的其他模块做二次分析的入口。
+ *  7. 集合式剪枝家族（GatherSteiner / GathSetPruneReconnect / MapSpanningUtils /
+ *     FastDisjointSet / NetworkXHelpers）是后补的一层，接在第 1 条的 DFS 链之后：
+ *     挑节点 → mehlhorn 近似 Steiner → 反复「剪低值格 + 重连」→ 再出树。
+ *     逐位对齐了原版，只有两处不可能对齐：
+ *       a) `get_prize_collecting_gather_mapmatrix` 原版走 pcst_fast（C++ 扩展，
+ *          没有纯 Python 回退），这里换成确定性贪心。**与原版求解器可能不同，
+ *          oracle 未覆盖该分支。**
+ *       b) networkx 的节点迭代序在本移植里按 tile_index 升序还原（Python 侧
+ *          set<Tile> 的槽位序在 tile_index 0..399 上恰好就是升序），这是刻意的。
  *
  * 坐标 / 接口：本文件的 tile 就是 EK.Tile（`tile.player()` 是方法不是属性），
  * 集合用 JS Set<Tile>（同一个 tile_index 在 map 里只有一个对象，按身份比较即可）。
@@ -1295,6 +1305,903 @@
     return out;
   }
 
+  /* ==================================================================
+   * GatherSteiner / MapSpanningUtils / FastDisjointSet 层
+   *
+   * 这一层是 GatherMaxIterativeSet 家族的外壳：先按价值挑一批节点，用近似
+   * Steiner 树把它们连起来，再反复「剪掉最低值的格子、重新连回来」，直到集合
+   * 大小接近目标回合数。出树之后仍然复用上面的 convert_contiguous_...。
+   *
+   * 顺序敏感点（改这块之前先读）：
+   *   - Python 侧所有 `for t in someSet` 的迭代序，在本图的 tile_index 域
+   *     （0..399，远小于 set 容量）里恰好等于 tile_index 升序（Tile.__hash__ 就是
+   *     tile_index）。下面一律用 sortedByTileIndex 显式还原这个序，否则建图的
+   *     边插入序会变，mehlhorn 的平局路径就跟着变。
+   *   - disconnectQueue 是 CPython heapq，元素是 (value, tile) 元组：平局时比较
+   *     Tile.__lt__（只比 army），army 再平则两者互不「小于」。这里必须照抄，
+   *     加任何兜底键都会让出堆序分叉。
+   * ================================================================== */
+
+  function getNx() {
+    if (!EK.nx && typeof module !== 'undefined' && module.exports) require('./nx.js');
+    if (!EK.nx) throw new Error('gather: 需要 EK.nx（先加载 src/eklipz/nx.js）');
+    return EK.nx;
+  }
+
+  // 还原 Python 里 set<Tile> 的迭代序（= tile_index 升序）。Array / Set 都能吃。
+  function sortedByTileIndex(tiles) {
+    var arr = [];
+    tiles.forEach(function (t) {
+      arr.push(t);
+    });
+    arr.sort(function (a, b) {
+      return a.tile_index - b.tile_index;
+    });
+    return arr;
+  }
+
+  /* ------------------------------------------------ NetworkXHelpers.py:56 */
+
+  // 横向/纵向各加一条边（每对只加一次），权重 = 目标格的 baseWeight - 价值；
+  // 障碍或多加 1000*baseWeight，等价于「除非别无选择否则不穿」。
+  function build_networkX_graph_flat_weight_mod_subtract(map, weightModMatrix, baseWeight, bannedTiles, validTiles) {
+    var nx = getNx();
+    if (baseWeight === undefined || baseWeight === null) baseWeight = 1;
+    var valid = validTiles || map.pathable_tiles;
+    var g = new nx.Graph();
+
+    function isBanned(t) {
+      return bannedTiles !== null && bannedTiles !== undefined && bannedTiles.has(t);
+    }
+
+    // 原版不给孤立格 add_node，只有能连边的格子才进图，所以这里同样只加边
+    var tiles = sortedByTileIndex(valid);
+    for (var i = 0; i < tiles.length; i++) {
+      var tile = tiles[i];
+      var fromWeight = baseWeight;
+      if (tile.isObstacle || isBanned(tile)) fromWeight += baseWeight * 1000;
+      fromWeight -= weightModMatrix.raw[tile.tile_index];
+
+      var right = map.GetTile(tile.x + 1, tile.y);
+      if (right && valid.has(right)) {
+        var rightWeight = fromWeight;
+        if (right.isObstacle || isBanned(right)) rightWeight += baseWeight * 1000;
+        rightWeight -= weightModMatrix.raw[right.tile_index];
+        g.add_edge(tile.tile_index, right.tile_index, { weight: rightWeight });
+      }
+
+      var down = map.GetTile(tile.x, tile.y + 1);
+      if (down && valid.has(down)) {
+        var downWeight = fromWeight;
+        if (down.isObstacle || isBanned(down)) downWeight += baseWeight * 1000;
+        downWeight -= weightModMatrix.raw[down.tile_index];
+        g.add_edge(tile.tile_index, down.tile_index, { weight: downWeight });
+      }
+    }
+    return g;
+  }
+
+  /* ------------------------------------------------ GatherSteiner.py:17 */
+
+  function build_network_x_steiner_tree_from_arbitrary_nx_graph(map, g, requiredTiles) {
+    var nx = getNx();
+    var terminalNodes = [];
+    var req = sortedByTileIndex(requiredTiles);
+    for (var i = 0; i < req.length; i++) terminalNodes.push(req[i].tile_index);
+
+    var steinerTree = nx.steiner_tree(g, terminalNodes, 'weight');
+    var included = new Set();
+    var nodes = steinerTree.nodes();
+    for (var n = 0; n < nodes.length; n++) included.add(map.get_tile_by_tile_index(nodes[n]));
+    return included;
+  }
+
+  function build_network_x_steiner_tree(map, requiredTiles, weightMod, searchingPlayer, baseWeight, bannedTiles) {
+    if (searchingPlayer === undefined || searchingPlayer === null) searchingPlayer = -2;
+    if (baseWeight === undefined || baseWeight === null) baseWeight = 1;
+    var g = build_networkX_graph_flat_weight_mod_subtract(map, weightMod, baseWeight, bannedTiles, null);
+    return build_network_x_steiner_tree_from_arbitrary_nx_graph(map, g, requiredTiles);
+  }
+
+  /* ------------------------------------------------ MapSpanningUtils.py:95 */
+
+  // 从 requiredTiles 出发把「最近的一个缺失 required 格子」一路吃下来，返回
+  // 覆盖到的全部格子（bare minimum 连接集）、仍未连上的 required 集合、以及
+  // 每条补齐路径末端的代价。bareMinTurns 就是第一个返回值的大小。
+  function _include_all_adj_required(node, includedSet, usefulStartSet, missingIncludedSet, costPer, fromNode) {
+    var q = [node];
+    while (q.length > 0) {
+      var tile = q.pop();
+      if (includedSet.has(tile)) continue;
+      includedSet.add(tile);
+      usefulStartSet.add(tile);
+      if (missingIncludedSet.has(tile)) {
+        missingIncludedSet.delete(tile);
+        costPer.set(tile, 1);
+      }
+      for (var m = 0; m < tile.movable.length; m++) {
+        var adj = tile.movable[m];
+        if (missingIncludedSet.has(adj)) q.push(adj);
+      }
+    }
+  }
+
+  function get_spanning_tree_set_from_tile_lists_with_cost_per(map, requiredTiles, bannedTiles) {
+    var includedSet = new Set();
+    var missingIncluded = new Set();
+    var costPer = new Map();
+    // 原版 usefulStartSet = includedSet.copy()，但两支每次都被同时写入，永远相同；
+    // 这里直接共用一个 Set，省掉一次全量复制。
+    var usefulStartSet = includedSet;
+    var banned = bannedTiles || new Set();
+
+    var req = sortedByTileIndex(requiredTiles);
+    for (var i = 0; i < req.length; i++) {
+      missingIncluded.add(req[i]);
+      banned.delete(req[i]);
+    }
+    if (req.length === 0) return [includedSet, missingIncluded, costPer];
+
+    var root = req[0];
+    _include_all_adj_required(root, includedSet, usefulStartSet, missingIncluded, costPer, null);
+
+    var findFunc = function (t) {
+      return missingIncluded.has(t);
+    };
+
+    while (missingIncluded.size > 0) {
+      // startTiles 必须给数组：breadth_first_find_queue 的 Set 分支读的是 val[0]，
+      // 传 Set 会拿 undefined 当起始距离，永远搜不到东西。
+      var path = EK.search.breadth_first_find_queue(map, sortedByTileIndex(usefulStartSet), findFunc, {
+        skipTiles: banned,
+        noLog: true
+      });
+      if (!path) {
+        var altBanned = new Set(banned);
+        var reachable = sortedByTileIndex(map.reachable_tiles);
+        for (var ri = 0; ri < reachable.length; ri++) {
+          if (reachable[ri].isMountain) altBanned.add(reachable[ri]);
+        }
+        path = EK.search.breadth_first_find_queue(map, sortedByTileIndex(includedSet), findFunc, {
+          skipTiles: altBanned,
+          bypassDefaultSkipLogic: true,
+          noLog: true
+        });
+        if (!path) break;
+      }
+
+      var lastTile = null;
+      var tl = path.tileList;
+      for (var k = 0; k < tl.length; k++) {
+        _include_all_adj_required(tl[k], includedSet, usefulStartSet, missingIncluded, costPer, lastTile);
+        lastTile = tl[k];
+      }
+      costPer.set(lastTile, path.length);
+    }
+    costPer.set(root, 0);
+    return [includedSet, missingIncluded, costPer];
+  }
+
+  /* ------------------------------------------------ FastDisjointSet.py:298 */
+
+  // 带「子集价值和」的并查集。原版索引键是 Tile 对象，这里换成 tile_index，
+  // 但 _indices 的插入序计数必须保留 —— merge 的平局就是靠它决定谁当根的。
+  function FastDisjointTileSetSum(valueLookup) {
+    this._value = valueLookup;
+    this._tiles = new Map();
+    this._parents = new Map();
+    this._sizes = new Map();
+    this._sums = new Map();
+    this._nbrs = new Map();
+    this._indices = new Map();
+    this.n_subsets = 0;
+  }
+
+  FastDisjointTileSetSum.prototype._add = function (tile) {
+    var i = tile.tile_index;
+    this._tiles.set(i, tile);
+    this._sizes.set(i, 1);
+    this._sums.set(i, this._value.raw[i]);
+    this._parents.set(i, i);
+    this._nbrs.set(i, i);
+    this._indices.set(i, this._indices.size);
+    this.n_subsets += 1;
+  };
+
+  FastDisjointTileSetSum.prototype.has = function (tile) {
+    return this._parents.has(tile.tile_index);
+  };
+
+  FastDisjointTileSetSum.prototype._find = function (i) {
+    var x = i;
+    while (this._parents.get(x) !== x) {
+      // 路径折半，跟 Python __getitem__ 的写法一致
+      this._parents.set(x, this._parents.get(this._parents.get(x)));
+      x = this._parents.get(x);
+    }
+    return x;
+  };
+
+  FastDisjointTileSetSum.prototype._rootOf = function (tile) {
+    var i = tile.tile_index;
+    if (!this._parents.has(i)) this._add(tile);
+    return this._find(i);
+  };
+
+  FastDisjointTileSetSum.prototype.merge = function (a, b) {
+    var xr = this._rootOf(a);
+    var yr = this._rootOf(b);
+    if (xr === yr) return false;
+    var sx = this._sizes.get(xr);
+    var sy = this._sizes.get(yr);
+    if (sx < sy || (sx === sy && this._indices.get(yr) < this._indices.get(xr))) {
+      var tmp = xr;
+      xr = yr;
+      yr = tmp;
+    }
+    this._parents.set(yr, xr);
+    this._sizes.set(xr, this._sizes.get(xr) + this._sizes.get(yr));
+    this._sums.set(xr, this._sums.get(xr) + this._sums.get(yr));
+    var nxr = this._nbrs.get(xr);
+    var nyr = this._nbrs.get(yr);
+    this._nbrs.set(xr, nyr);
+    this._nbrs.set(yr, nxr);
+    this.n_subsets -= 1;
+    return true;
+  };
+
+  FastDisjointTileSetSum.prototype.connected = function (a, b) {
+    return this._rootOf(a) === this._rootOf(b);
+  };
+
+  FastDisjointTileSetSum.prototype.subset_size = function (tile) {
+    return this._sizes.get(this._rootOf(tile));
+  };
+
+  FastDisjointTileSetSum.prototype.subset_value = function (tile) {
+    return this._sums.get(this._rootOf(tile));
+  };
+
+  // 顺着 _nbrs 的环形链表把同一子集走一圈（原版就是这么实现的）
+  FastDisjointTileSetSum.prototype.subset_with_value = function (tile) {
+    this._rootOf(tile);
+    var seed = tile.tile_index;
+    var seedIdx = this._indices.get(seed);
+    var out = new Set([tile]);
+    var nxt = this._nbrs.get(seed);
+    while (this._indices.get(nxt) !== seedIdx) {
+      out.add(this._tiles.get(nxt));
+      nxt = this._nbrs.get(nxt);
+    }
+    return [out, this._sums.get(this._find(seed))];
+  };
+
+  /* ------------------------------------------------ CPython heapq 复刻 */
+
+  // (value, tile) 元组：先比 value，平局退到 Tile.__lt__（只比 army）。
+  // army 也相等时互不「小于」——没有全序，这正是原版的语义。
+  function _lessValTile(a, b) {
+    if (a[0] !== b[0]) return a[0] < b[0];
+    return a[1].army < b[1].army;
+  }
+
+  function _heapPushValTile(h, item) {
+    h.push(item);
+    var pos = h.length - 1;
+    while (pos > 0) {
+      var parentpos = (pos - 1) >> 1;
+      var parent = h[parentpos];
+      if (!_lessValTile(item, parent)) break;
+      h[pos] = parent;
+      pos = parentpos;
+    }
+    h[pos] = item;
+  }
+
+  function _heapPopValTile(h) {
+    var lastelt = h.pop();
+    if (h.length === 0) return lastelt;
+    var returnitem = h[0];
+    var pos = 0;
+    var endpos = h.length;
+    var childpos = 1;
+    while (childpos < endpos) {
+      var rightpos = childpos + 1;
+      // Python 的 _siftup 在平局时挑「右」孩子
+      if (rightpos < endpos && !_lessValTile(h[childpos], h[rightpos])) childpos = rightpos;
+      h[pos] = h[childpos];
+      pos = childpos;
+      childpos = (pos << 1) + 1;
+    }
+    h[pos] = lastelt;
+    while (pos > 0) {
+      var parentpos = (pos - 1) >> 1;
+      var parent = h[parentpos];
+      if (!_lessValTile(h[pos], parent)) break;
+      h[pos] = parent;
+      h[parentpos] = lastelt;
+      pos = parentpos;
+    }
+    return returnitem;
+  }
+
+  /* ------------------------------------------------ GathSetPruneReconnect.py:655 */
+
+  // 从 node 往上剪：只剪「值不超过起点、且不超过来路」的连通块，
+  // root 格子永不剪（否则聚合树就断了）。
+  function _prune_connected(node, setToPrune, valueMatrix, disconnectCounts, rootTiles) {
+    var cutoff = valueMatrix.raw[node.tile_index];
+    var q = [[node, cutoff]];
+    var pruned = [];
+    while (q.length > 0) {
+      var item = q.pop();
+      var tile = item[0];
+      var fromVal = item[1];
+      var curVal = valueMatrix.raw[tile.tile_index];
+      if (!setToPrune.has(tile) || curVal > cutoff || curVal > fromVal) continue;
+      pruned.push(tile);
+      setToPrune.delete(tile);
+      disconnectCounts.raw[tile.tile_index] += 1;
+      for (var m = 0; m < tile.movable.length; m++) {
+        var movable = tile.movable[m];
+        if (!setToPrune.has(movable) && !rootTiles.has(movable)) continue;
+        q.push([movable, curVal]);
+      }
+    }
+    return pruned;
+  }
+
+  /* ------------------------------------------------ GathSetPruneReconnect.py:369 */
+
+  // 把剪散的 curSet 重新连成一整块：以 someRoot 所在的连通块为核，每次用
+  // breadth_first_dynamic_max 找一条「通往另一块 + 顺路捡价值最高」的路径连进来。
+  function _reconnect(map, pruneTo, curSet, rootTiles, justDisconnectedTiles, disconnectedCounts,
+                      skipTiles, valueMatrix, bareMinTurns) {
+    var forest = new FastDisjointTileSetSum(valueMatrix);
+    var newTiles = new Set();
+    var negativeTiles = null;
+
+    var roots = sortedByTileIndex(rootTiles);
+    var someRoot = null;
+    for (var r = 0; r < roots.length; r++) someRoot = roots[r];
+    if (someRoot === null) throw new Error('_reconnect: rootTiles 为空');
+
+    var curSorted = sortedByTileIndex(curSet);
+    for (var ci = 0; ci < curSorted.length; ci++) {
+      var t = curSorted[ci];
+      for (var m = 0; m < t.movable.length; m++) {
+        var adj = t.movable[m];
+        if (curSet.has(adj)) forest.merge(t, adj);
+      }
+    }
+
+    function valueFunc(tile, prio) {
+      if (!forest.has(tile)) return null;
+      var dist = prio[1];
+      var negGatherPoints = prio[2];
+      var originTile = prio[4];
+      if (forest.connected(tile, originTile)) return null;
+      var missingSize = forest.subset_size(tile);
+      return [0 - negGatherPoints, 0 - dist - missingSize];
+    }
+
+    var searchOpts = {
+      // 原版这里没有时间上限；给 Infinity 才不会因为机器快慢分叉
+      maxTime: Infinity,
+      maxIterations: Infinity,
+      negativeTiles: negativeTiles
+    };
+
+    while (forest.subset_size(someRoot) < pruneTo) {
+      var excessTurnsLeft = pruneTo - forest.subset_size(someRoot);
+
+      var prioFunc = function (tile, prioObj) {
+        var dist = prioObj[1];
+        var negGatherPoints = prioObj[2];
+        var fromTile = prioObj[3];
+        var originTile = prioObj[4];
+        // 不许穿过森林自己的其它部分，否则会绕过价值评估
+        if (fromTile !== null && fromTile !== undefined && forest.has(fromTile) && fromTile !== originTile) {
+          return null;
+        }
+        negGatherPoints -= valueMatrix.raw[tile.tile_index];
+        var newDist = dist + 1;
+        var newPrio = negGatherPoints < 0 ? negGatherPoints / newDist : negGatherPoints * newDist;
+        if (forest.has(tile)) newPrio -= 100;
+        return [newPrio, newDist, negGatherPoints, tile, originTile];
+      };
+
+      var usefulStartSet = new Map();
+      for (var ui = 0; ui < curSorted.length; ui++) {
+        var ut = curSorted[ui];
+        if (!forest.connected(ut, someRoot)) {
+          usefulStartSet.set(ut, [[-10000, 0, 0, null, ut], forest.subset_size(ut) - 1]);
+        }
+      }
+
+      var capTurns = excessTurnsLeft;
+      var path = EK.search.breadth_first_dynamic_max(map, usefulStartSet, valueFunc, {
+        maxTurns: capTurns,
+        maxDepth: capTurns,
+        negativeTiles: negativeTiles,
+        skipTiles: skipTiles,
+        priorityFunc: prioFunc,
+        maxTime: searchOpts.maxTime,
+        maxIterations: searchOpts.maxIterations,
+        noLog: true
+      });
+      if (!path) {
+        path = EK.search.breadth_first_dynamic_max(map, usefulStartSet, valueFunc, {
+          maxTurns: capTurns,
+          maxDepth: capTurns,
+          negativeTiles: negativeTiles,
+          skipTiles: skipTiles,
+          priorityFunc: prioFunc,
+          noNeutralCities: false,
+          maxTime: searchOpts.maxTime,
+          maxIterations: searchOpts.maxIterations,
+          noLog: true
+        });
+        if (!path) break;
+      }
+
+      var tl = path.tileList;
+      var last = tl[tl.length - 1];
+      for (var k = 1; k < tl.length - 1; k++) newTiles.add(tl[k]);
+      for (var k2 = 0; k2 < tl.length; k2++) forest.merge(tl[k2], last);
+    }
+
+    return [newTiles, forest];
+  }
+
+  /* ------------------------------------------------ GathSetPruneReconnect.py:114 */
+
+  function _k_prune_reconnect_greedy(map, toTurns, contiguousTiles, rootTiles, initialRawValueMatrix,
+                                     addlRequiredTiles, skipTiles, renderLive) {
+    var disconnectQueue = [];
+    var liveSum = 0;
+    var liveValueMatrix = initialRawValueMatrix.copy();
+    var disconnectCounts = new EK.MapMatrix(map, 0);
+
+    // root 本身也要算进回合预算里，否则剪出来的集合永远差 len(rootTiles)
+    var pruneTo = toTurns + rootTiles.size;
+    var curSet = new Set();
+    contiguousTiles.forEach(function (t) {
+      curSet.add(t);
+    });
+    rootTiles.forEach(function (t) {
+      curSet.add(t);
+    });
+
+    var requiredTiles = rootTiles;
+    if (addlRequiredTiles) {
+      requiredTiles = new Set();
+      rootTiles.forEach(function (t) {
+        requiredTiles.add(t);
+      });
+      addlRequiredTiles.forEach(function (t) {
+        requiredTiles.add(t);
+      });
+    }
+    var banned = skipTiles;
+    if (banned === null || banned === undefined) banned = new Set();
+    var spanning = get_spanning_tree_set_from_tile_lists_with_cost_per(map, requiredTiles, banned);
+    var minIncluded = spanning[0];
+    var bareMinTurns = minIncluded.size;
+
+    var unionForExcess = new Set();
+    contiguousTiles.forEach(function (t) {
+      unionForExcess.add(t);
+    });
+    requiredTiles.forEach(function (t) {
+      unionForExcess.add(t);
+    });
+    var excessTiles = unionForExcess.size - toTurns;
+    var prunePerIter = 7;
+    if (excessTiles > toTurns * 0.5) prunePerIter = Math.max(3, Math.floor(excessTiles / 10));
+
+    var contiguousSorted = sortedByTileIndex(contiguousTiles);
+    for (var i = 0; i < contiguousSorted.length; i++) {
+      var t = contiguousSorted[i];
+      if (rootTiles.has(t)) continue;
+      _heapPushValTile(disconnectQueue, [liveValueMatrix.raw[t.tile_index], t]);
+      liveSum += initialRawValueMatrix.raw[t.tile_index];
+    }
+
+    var unelimmed = new Set();
+    contiguousTiles.forEach(function (tt) {
+      unelimmed.add(tt);
+    });
+
+    var prunedThisIter = new Set();
+    var bestOuterFound = null;
+    var bestOuterValue = -1000.0;
+    var bestOuterTurns = -1000;
+    var closestConnected = null;
+    var pruneThreshold = 0;
+
+    if (disconnectQueue.length > 0) pruneThreshold = disconnectQueue[0][0];
+
+    for (;;) {
+      if (disconnectQueue.length === 0) break;
+
+      pruneThreshold = disconnectQueue[0][0] + 0.5;
+      for (;;) {
+        if (disconnectQueue.length === 0) break;
+        if (disconnectQueue[0][0] > pruneThreshold && prunedThisIter.size > 0 &&
+            curSet.size < pruneTo - prunePerIter) {
+          break;
+        }
+        var popped = _heapPopValTile(disconnectQueue);
+        var nextDisconnect = popped[1];
+
+        var pruned = _prune_connected(nextDisconnect, curSet, initialRawValueMatrix, disconnectCounts, rootTiles);
+        if (pruned.length === 0) continue;
+
+        for (var pi = 0; pi < pruned.length; pi++) prunedThisIter.add(pruned[pi]);
+        for (var pj = 0; pj < pruned.length; pj++) {
+          unelimmed.delete(pruned[pj]);
+          liveSum -= initialRawValueMatrix.raw[pruned[pj].tile_index];
+        }
+      }
+
+      var reconnected = _reconnect(map, pruneTo, curSet, rootTiles, prunedThisIter, disconnectCounts,
+        skipTiles, initialRawValueMatrix, bareMinTurns);
+      var newTiles = reconnected[0];
+      var forest = reconnected[1];
+
+      // 重连之后可能拆成多块，取「价值最高」的那块当主体（等值不换，用严格大于）
+      var roots = sortedByTileIndex(rootTiles);
+      var bestRoot = roots[0];
+      var seed = forest.subset_with_value(bestRoot);
+      var newBestRootSet = seed[0];
+      var bestVal = seed[1];
+      for (var ri = 0; ri < roots.length; ri++) {
+        var root = roots[ri];
+        if (newBestRootSet.has(root)) continue;
+        var rootSubset = forest.subset_with_value(root);
+        if (rootSubset[1] > bestVal) {
+          newBestRootSet = rootSubset[0];
+          bestVal = rootSubset[1];
+          bestRoot = root;
+        }
+      }
+
+      closestConnected = newBestRootSet;
+      var outerAbs = Math.abs(bestOuterTurns - pruneTo);
+      var innerAbs = Math.abs(closestConnected.size - pruneTo);
+      if (bestOuterFound === null || outerAbs > innerAbs || (outerAbs === innerAbs && bestOuterValue < bestVal)) {
+        bestOuterFound = new Set(closestConnected);
+        bestOuterValue = bestVal;
+        bestOuterTurns = closestConnected.size;
+      }
+
+      curSet = new Set(closestConnected);
+      unelimmed.forEach(function (tt) {
+        curSet.add(tt);
+      });
+
+      var curAvg = liveSum / curSet.size;
+      var newTilesSorted = sortedByTileIndex(newTiles);
+      for (var ni = 0; ni < newTilesSorted.length; ni++) {
+        var tile = newTilesSorted[ni];
+        var discCount = disconnectCounts.raw[tile.tile_index];
+        var val = liveValueMatrix.raw[tile.tile_index];
+        // 被剪过的格子回填一点平均价值，免得同一块被反复剪/连
+        if (discCount > 0) {
+          val += curAvg / 4;
+          liveValueMatrix.raw[tile.tile_index] = val;
+        }
+        _heapPushValTile(disconnectQueue, [val, tile]);
+        liveSum += initialRawValueMatrix.raw[tile.tile_index];
+      }
+
+      // curSet 就是 closestConnected ∪ unelimmed，大小相同就表示 unelimmed 已经包含在里面
+      if (closestConnected.size === pruneTo && curSet.size === closestConnected.size) break;
+
+      prunedThisIter.clear();
+    }
+
+    return bestOuterFound;
+  }
+
+  /* ------------------------------------------------ GathSetPruneReconnect.py:23 */
+
+  function get_gather_plan_set_prune(map, rootTiles, valueMatrix, targetTurns, asPlayer, negativeTiles,
+                                     useTrueValueGathered, includeGatherPriorityAsEconValues,
+                                     includeCapturePriorityAsEconValues, skipTiles, renderLive) {
+    if (asPlayer === undefined || asPlayer === null || asPlayer === -1) asPlayer = map.player_index;
+
+    // 原版 sorted(..., reverse=True) 是稳定排序，等值保持 players[asPlayer].tiles 的
+    // 迭代序（= tile_index 升序）；JS 的 sort 也是稳定的，用降序比较器即可等价。
+    var candidates = [];
+    var playerTiles = sortedByTileIndex(map.players[asPlayer].tiles);
+    for (var i = 0; i < playerTiles.length; i++) {
+      if (playerTiles[i].army > 1) candidates.push(playerTiles[i]);
+    }
+    candidates.sort(function (a, b) {
+      return valueMatrix.raw[b.tile_index] - valueMatrix.raw[a.tile_index];
+    });
+
+    var allNodes = new Set();
+    rootTiles.forEach(function (t) {
+      allNodes.add(t);
+    });
+    for (var j = 0; j < targetTurns && j < candidates.length; j++) allNodes.add(candidates[j]);
+
+    var steinerNodes = build_network_x_steiner_tree(map, allNodes, valueMatrix, asPlayer, 1000, skipTiles);
+    var outputTiles = _k_prune_reconnect_greedy(map, targetTurns, steinerNodes, rootTiles, valueMatrix,
+      null, skipTiles, !!renderLive);
+
+    return convert_contiguous_tile_tree_to_gather_capture_plan(map, rootTiles, outputTiles, asPlayer,
+      negativeTiles, valueMatrix, useTrueValueGathered, includeGatherPriorityAsEconValues,
+      includeCapturePriorityAsEconValues, null, null, null);
+  }
+
+  /* ------------------------------------------------ GatherUtils.py:1307 / 1539 */
+
+  function build_max_value_gather_tree_linking_specific_nodes(map, rootTiles, tiles, valueMatrix, asPlayer,
+                                                             negativeTiles, useTrueValueGathered,
+                                                             includeGatherPriorityAsEconValues,
+                                                             includeCapturePriorityAsEconValues,
+                                                             pruneToTurns, skipTiles, viewInfo) {
+    if (asPlayer === undefined || asPlayer === null || asPlayer === -1) asPlayer = map.player_index;
+
+    var allNodes = new Set();
+    rootTiles.forEach(function (t) {
+      allNodes.add(t);
+    });
+    if (tiles) {
+      tiles.forEach(function (t) {
+        allNodes.add(t);
+      });
+    }
+
+    var outputTiles = build_network_x_steiner_tree(map, allNodes, valueMatrix, asPlayer, 10000, skipTiles);
+    if (pruneToTurns !== undefined && pruneToTurns !== null) {
+      prune_raw_connected_nodes_to_turns__bfs(rootTiles, outputTiles, pruneToTurns, asPlayer, valueMatrix,
+        negativeTiles, false);
+    }
+
+    return convert_contiguous_tile_tree_to_gather_capture_plan(map, rootTiles, outputTiles, asPlayer,
+      negativeTiles, valueMatrix, useTrueValueGathered, includeGatherPriorityAsEconValues,
+      includeCapturePriorityAsEconValues, null, null, viewInfo);
+  }
+
+  function gath_set_quick(map, targetTurns, rootTiles, searchingPlayer, valueMatrix, tilesToIncludeIfPossible,
+                          negativeTiles, useTrueValueGathered, includeGatherPriorityAsEconValues,
+                          includeCapturePriorityAsEconValues, skipTiles, viewInfo) {
+    var visited = new Set();
+    var toTryToInclude = [];
+    if (tilesToIncludeIfPossible) {
+      var forced = sortedByTileIndex(tilesToIncludeIfPossible);
+      for (var i = 0; i < forced.length; i++) {
+        visited.add(forced[i].tile_index);
+        toTryToInclude.push(forced[i]);
+      }
+    }
+
+    var toSort = [];
+    var allTiles = sortedByTileIndex(map.get_all_tiles());
+    for (var j = 0; j < allTiles.length; j++) {
+      var t = allTiles[j];
+      if (visited.has(t.tile_index)) continue;
+      if (!map.is_tile_on_team_with(t, searchingPlayer)) continue;
+      toSort.push(t);
+    }
+    // negativeTiles 里的格子价值按 0 计（原版就是取 0.0 而不是它们的原始值）
+    toSort.sort(function (a, b) {
+      var av = negativeTiles === null || negativeTiles === undefined || !negativeTiles.has(a)
+        ? valueMatrix.raw[a.tile_index] : 0.0;
+      var bv = negativeTiles === null || negativeTiles === undefined || !negativeTiles.has(b)
+        ? valueMatrix.raw[b.tile_index] : 0.0;
+      return bv - av;
+    });
+
+    var toIdx = targetTurns - toTryToInclude.length;
+    for (var k = 0; k < toIdx && k < toSort.length; k++) {
+      visited.add(toSort[k].tile_index);
+      toTryToInclude.push(toSort[k]);
+    }
+
+    var allNodes = new Set();
+    rootTiles.forEach(function (t2) {
+      allNodes.add(t2);
+    });
+    for (var m = 0; m < toTryToInclude.length; m++) allNodes.add(toTryToInclude[m]);
+
+    var steinerNodes = build_network_x_steiner_tree(map, allNodes, valueMatrix, searchingPlayer, 10000, skipTiles);
+    prune_raw_connected_nodes_to_turns__bfs(rootTiles, steinerNodes, targetTurns, searchingPlayer, valueMatrix,
+      negativeTiles, false);
+
+    return build_max_value_gather_tree_linking_specific_nodes(map, rootTiles, toTryToInclude, valueMatrix,
+      searchingPlayer, negativeTiles, useTrueValueGathered, includeGatherPriorityAsEconValues,
+      includeCapturePriorityAsEconValues, targetTurns, skipTiles, viewInfo);
+  }
+
+  /* ------------------------------------------------ GatherSteiner.py:71 / 195
+   *
+   * prize-collecting 分支：原版的求解器是 pcst_fast（C++ 扩展），没有纯 Python
+   * 回退实现，Python 侧也不存在可以照抄的第二条路径，所以这里只能给一个确定性
+   * 贪心：每次从当前树做一次 Dijkstra，挑「prize / 路代价」最高的格子把路径并
+   * 进来。与原版求解器可能不同，oracle 未覆盖该分支（oracle 侧仍走 C++ 求解器，
+   * 因此这一条在 diff 里被标为 skipped 而不是不一致）。
+   */
+
+  function _build_pcst_tile_prize_matrix(map, searchingPlayer, rootTiles, negativeTiles,
+                                         prioritizeCaptureHighArmyTiles, skipTiles, enemyArmyFactor,
+                                         enemyArmyLimit, gatherMatrix, captureMatrix, tilesToHalf,
+                                         hintIncludeTiles) {
+    var tilePrizeMatrix = new EK.MapMatrix(map, 0.0);
+    var tileExtraCostMatrix = new EK.MapMatrix(map, 0.0);
+
+    if (negativeTiles) {
+      sortedByTileIndex(negativeTiles).forEach(function (tile) {
+        tileExtraCostMatrix.raw[tile.tile_index] += 2.0;
+        tilePrizeMatrix.raw[tile.tile_index] = -1.0;
+      });
+    }
+    if (hintIncludeTiles) {
+      sortedByTileIndex(hintIncludeTiles).forEach(function (tile) {
+        tileExtraCostMatrix.raw[tile.tile_index] = -1.0;
+        tilePrizeMatrix.raw[tile.tile_index] += 0.5;
+      });
+    }
+    if (rootTiles) {
+      sortedByTileIndex(rootTiles).forEach(function (tile) {
+        tilePrizeMatrix.raw[tile.tile_index] += 1.0;
+        tileExtraCostMatrix.raw[tile.tile_index] = -1.0;
+      });
+    }
+
+    var minCost = 1000000.0;
+    var maxCost = -1000000.0;
+    var minPrize = 1000000.0;
+    var maxPrize = -1000000.0;
+
+    var reachable = sortedByTileIndex(map.reachable_tiles);
+    for (var i = 0; i < reachable.length; i++) {
+      var tile = reachable[i];
+      var idx = tile.tile_index;
+      if (skipTiles && skipTiles.has(tile)) continue;
+
+      var prize = tilePrizeMatrix.raw[idx];
+      var extraCost = tileExtraCostMatrix.raw[idx];
+
+      if (negativeTiles !== null && negativeTiles !== undefined && negativeTiles.has(tile)) {
+        prize = 0.0;
+      } else if (map.is_tile_on_team_with(tile, searchingPlayer)) {
+        prize = tile.army;
+        if (gatherMatrix) prize += gatherMatrix.raw[idx];
+      } else if (tile.army >= -1) {
+        if (!prioritizeCaptureHighArmyTiles) {
+          extraCost = tile.army * enemyArmyFactor;
+          if (captureMatrix && tile.army < enemyArmyLimit) prize = captureMatrix.raw[idx];
+        } else if (captureMatrix && tile.army < enemyArmyLimit) {
+          prize = tile.army * enemyArmyFactor + captureMatrix.raw[idx];
+        }
+      }
+
+      if (extraCost < minCost) minCost = extraCost;
+      if (extraCost > maxCost) maxCost = extraCost;
+      if (prize < minPrize) minPrize = prize;
+      if (prize > maxPrize) maxPrize = prize;
+      tilePrizeMatrix.raw[idx] = prize;
+      tileExtraCostMatrix.raw[idx] = extraCost;
+    }
+
+    if (tilesToHalf) {
+      sortedByTileIndex(tilesToHalf).forEach(function (tile) {
+        tilePrizeMatrix.raw[tile.tile_index] /= 2.0;
+      });
+    }
+
+    return [tilePrizeMatrix, minPrize, maxPrize, tileExtraCostMatrix, minCost, maxCost];
+  }
+
+  // 确定性 prize-collecting 贪心（见上，未与原版 pcst_fast 对齐）
+  function _pcst_greedy(map, targetTurns, rootTiles, tilePrizeMatrix, tileExtraCostMatrix,
+                        skipTiles, mustInclude) {
+    var inTree = new Set();
+    var tree = [];
+    var roots = sortedByTileIndex(rootTiles || []);
+    for (var r = 0; r < roots.length; r++) {
+      inTree.add(roots[r].tile_index);
+      tree.push(roots[r]);
+    }
+    if (mustInclude) {
+      sortedByTileIndex(mustInclude).forEach(function (t) {
+        if (tilePrizeMatrix.has(t)) tilePrizeMatrix.set(t, tilePrizeMatrix.get(t) + 150);
+      });
+    }
+
+    while (tree.length < targetTurns) {
+      // 从当前树做一次 Dijkstra（代价 = 1 + 额外代价），拿到每个格子的路代价与父格
+      var dist = new Map();
+      var parent = new Map();
+      var heap = [];
+      for (var i = 0; i < tree.length; i++) {
+        var ti = tree[i].tile_index;
+        dist.set(ti, 0);
+        heap.push([0, ti]);
+      }
+      heap.sort(function (a, b) {
+        return a[0] - b[0];
+      });
+      while (heap.length > 0) {
+        var top = heap.shift();
+        var d = top[0];
+        var idx2 = top[1];
+        if (d > dist.get(idx2)) continue;
+        var tile2 = map.get_tile_by_tile_index(idx2);
+        for (var m = 0; m < tile2.movable.length; m++) {
+          var nb = tile2.movable[m];
+          if (nb.isMountain) continue;
+          if (skipTiles && skipTiles.has(nb)) continue;
+          var stepCost = 1.0 + Math.max(0.0, tileExtraCostMatrix.raw[nb.tile_index]);
+          var nd = d + stepCost;
+          if (!dist.has(nb.tile_index) || nd < dist.get(nb.tile_index)) {
+            dist.set(nb.tile_index, nd);
+            parent.set(nb.tile_index, idx2);
+            heap.push([nd, nb.tile_index]);
+          }
+        }
+        heap.sort(function (a, b) {
+          return a[0] - b[0] || a[1] - b[1];
+        });
+      }
+
+      var bestIdx = -1;
+      var bestScore = -Infinity;
+      var keys = Array.from(dist.keys()).sort(function (a, b) {
+        return a - b;
+      });
+      for (var k = 0; k < keys.length; k++) {
+        var cand = keys[k];
+        if (inTree.has(cand)) continue;
+        var prize2 = tilePrizeMatrix.raw[cand];
+        if (!(prize2 > 0)) continue;
+        var score = prize2 / (dist.get(cand) + 1.0);
+        if (score > bestScore) {
+          bestScore = score;
+          bestIdx = cand;
+        }
+      }
+      if (bestIdx < 0) break;
+
+      var walk = bestIdx;
+      var added = [];
+      while (walk !== undefined && !inTree.has(walk)) {
+        inTree.add(walk);
+        added.push(walk);
+        walk = parent.get(walk);
+      }
+      added.sort(function (a, b) {
+        return a - b;
+      });
+      for (var a2 = 0; a2 < added.length; a2++) tree.push(map.get_tile_by_tile_index(added[a2]));
+      if (added.length === 0) break;
+    }
+    return tree;
+  }
+
+  function get_prize_collecting_gather_mapmatrix(map, searchingPlayer, targetTurns, maxTurns, gatherMatrix,
+                                                 captureMatrix, rootTiles, negativeTiles,
+                                                 prioritizeCaptureHighArmyTiles, skipTiles,
+                                                 hintIncludeTiles, tilesToHalf, enemyArmyCostFactor,
+                                                 enemyArmyLimit) {
+    if (searchingPlayer === undefined || searchingPlayer === null) searchingPlayer = -2;
+    if (rootTiles === undefined || rootTiles === null) rootTiles = [];
+    var built = _build_pcst_tile_prize_matrix(map, searchingPlayer, rootTiles, negativeTiles,
+      !!prioritizeCaptureHighArmyTiles, skipTiles, enemyArmyCostFactor === undefined ? 0.1 : enemyArmyCostFactor,
+      enemyArmyLimit === undefined ? 10 : enemyArmyLimit, gatherMatrix, captureMatrix, tilesToHalf,
+      hintIncludeTiles);
+    var want = targetTurns >= 0 ? targetTurns : (maxTurns === undefined || maxTurns === null ? 40 : maxTurns);
+    var out = _pcst_greedy(map, want, rootTiles, built[0], built[3], skipTiles, null);
+    if (out.length === 0) return null;
+    return out;
+  }
+
   var GatherPrune = {
     get_tree_moves: get_tree_moves,
     get_tree_move: get_tree_move,
@@ -1317,7 +2224,35 @@
     prune_mst_to_army: prune_mst_to_army,
     prune_mst_to_turns: prune_mst_to_turns,
     gather_to_tile_plan: gather_to_tile_plan,
-    friendly_connected_region: friendly_connected_region
+    friendly_connected_region: friendly_connected_region,
+
+    // GatherSteiner / 装配层
+    build_networkX_graph_flat_weight_mod_subtract: build_networkX_graph_flat_weight_mod_subtract,
+    build_network_x_steiner_tree: build_network_x_steiner_tree,
+    build_network_x_steiner_tree_from_arbitrary_nx_graph: build_network_x_steiner_tree_from_arbitrary_nx_graph,
+    build_max_value_gather_tree_linking_specific_nodes: build_max_value_gather_tree_linking_specific_nodes,
+    gath_set_quick: gath_set_quick,
+    get_prize_collecting_gather_mapmatrix: get_prize_collecting_gather_mapmatrix,
+    _build_pcst_tile_prize_matrix: _build_pcst_tile_prize_matrix,
+
+    // 集合式剪枝 / 重连
+    get_spanning_tree_set_from_tile_lists_with_cost_per: get_spanning_tree_set_from_tile_lists_with_cost_per,
+    get_gather_plan_set_prune: get_gather_plan_set_prune,
+    FastDisjointTileSetSum: FastDisjointTileSetSum,
+    sortedByTileIndex: sortedByTileIndex
+  };
+
+  EK.GatherSteiner = {
+    build_network_x_steiner_tree: build_network_x_steiner_tree,
+    build_network_x_steiner_tree_from_arbitrary_nx_graph: build_network_x_steiner_tree_from_arbitrary_nx_graph,
+    get_prize_collecting_gather_mapmatrix: get_prize_collecting_gather_mapmatrix
+  };
+
+  EK.GatherSetPrune = {
+    get_gather_plan_set_prune: get_gather_plan_set_prune,
+    _k_prune_reconnect_greedy: _k_prune_reconnect_greedy,
+    _reconnect: _reconnect,
+    _prune_connected: _prune_connected
   };
 
   EK.Move = Move;

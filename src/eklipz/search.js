@@ -399,7 +399,15 @@
     var goalSet = new Set();
     var goalEntries = [];
 
-    var isDict = !Array.isArray(goalList);
+    // 原版 goalList 接受 dict(Tile -> (startDist, targetArmy, inc)) 或任意可迭代的格子集合。
+    // JS 侧必须显式区分：Set 是可迭代不是字典，早先按「非数组即字典」判会把 Set 当字典解，
+    // 甚至在拿到 MapMatrix 之类没有 forEach 的东西时直接崩。
+    if (goalList instanceof Set) goalList = Array.from(goalList);
+    else if (goalList && !Array.isArray(goalList) && !(goalList instanceof Map) && typeof goalList.forEach !== 'function') {
+      goalList = Array.from(goalList);
+    }
+
+    var isDict = goalList instanceof Map;
     if (isDict) {
       goalList.forEach(function (val, goal) {
         goalEntries.push({
@@ -1601,7 +1609,279 @@
     if (opt(opts, 'useGlobalVisitedSet', true) && !opt(opts, 'forceOld', false)) {
       return breadth_first_dynamic_max_per_tile_per_distance_global_visited(map, startTiles, valueFunc, opts);
     }
-    throw new Error('breadth_first_dynamic_max_per_tile_per_distance: forceOld variant not ported (dead code).');
+    return breadth_first_dynamic_max_per_tile_per_distance_nonglobal(map, startTiles, valueFunc, opts);
+  }
+
+  /* SearchUtils.py:1823-2177 的 useGlobalVisitedSet=False 分支。
+   * ExpandUtils 每回合都用 forceNoGlobalVisited=True 调它 —— 这个分支不是死代码，
+   * 它跟 global 版是两种语义：允许同一格被多次 pop（nodeList 拷贝），
+   * 因此才能拿到「同一格在不同距离上的不同最大值」。 */
+  function breadth_first_dynamic_max_per_tile_per_distance_nonglobal(map, startTiles, valueFunc, opts) {
+    opts = opts || {};
+    var maxTurns = opt(opts, 'maxTurns', 100);
+    var maxDepth = opt(opts, 'maxDepth', 100);
+    var noNeutralCities = opt(opts, 'noNeutralCities', false);
+    var negativeTiles = opt(opts, 'negativeTiles', null);
+    var skipTiles = opt(opts, 'skipTiles', null);
+    var searchingPlayer = opt(opts, 'searchingPlayer', -2);
+    var priorityFunc = opt(opts, 'priorityFunc', null);
+    var skipFunc = opt(opts, 'skipFunc', null);
+    var ignoreStartTile = opt(opts, 'ignoreStartTile', false);
+    var incrementBackward = opt(opts, 'incrementBackward', false);
+    var preferNeutral = opt(opts, 'preferNeutral', false);
+    var fullOnly = opt(opts, 'fullOnly', false);
+    var fullOnlyArmyDistFunc = opt(opts, 'fullOnlyArmyDistFunc', null);
+    var boundFunc = opt(opts, 'boundFunc', null);
+    var maxIterations = opt(opts, 'maxIterations', INF);
+    var includePath = opt(opts, 'includePath', false);
+    var pathValueFunc = opt(opts, 'pathValueFunc', null);
+    var priorityMatrix = opt(opts, 'priorityMatrix', null);
+    var priorityMatrixSkipStart = opt(opts, 'priorityMatrixSkipStart', false);
+    var priorityMatrixSkipEnd = opt(opts, 'priorityMatrixSkipEnd', false);
+    var ignoreNonPlayerArmy = opt(opts, 'ignoreNonPlayerArmy', false);
+    var ignoreIncrement = opt(opts, 'ignoreIncrement', true);
+    var useGlobalVisitedSet = opt(opts, 'useGlobalVisitedSet', false);
+
+    if (negativeTiles === null || negativeTiles === undefined) negativeTiles = new Set();
+
+    var defaultPriorityFunc = function (nextTile, currentPriorityObject) {
+      var dist = currentPriorityObject[0];
+      var negCityCount = currentPriorityObject[1];
+      var negEnemyTileCount = currentPriorityObject[2];
+      var negArmySum = currentPriorityObject[3];
+      var sumX = currentPriorityObject[4];
+      var sumY = currentPriorityObject[5];
+      var goalIncrement = currentPriorityObject[6];
+
+      dist += 1;
+      if (nextTile.isCity) negCityCount -= 1;
+      if (nextTile.player() !== searchingPlayer && (nextTile.player() !== -1 || (preferNeutral && !nextTile.isCity))) {
+        negEnemyTileCount -= 1;
+      }
+
+      /* 原版这里写的是 `next not in negativeTiles`，靠闭包读到外层循环的 next；
+       * 它跟 nextTile 一定是同一格，所以直接判 nextTile，语义不变。 */
+      if (!negHas(negativeTiles, nextTile)) {
+        if (nextTile.player() === searchingPlayer) negArmySum -= nextTile.army;
+        else negArmySum += nextTile.army;
+      }
+      negArmySum += 1;
+      negArmySum -= goalIncrement;
+      return [dist, negCityCount, negEnemyTileCount, negArmySum, sumX + nextTile.x, sumY + nextTile.y, goalIncrement];
+    };
+
+    if (fullOnly) {
+      var oldValFunc = valueFunc;
+      valueFunc = function (current, prioVals) {
+        var res = fullOnlyArmyDistFunc(current, prioVals);
+        var army = res[0];
+        var dist = res[1];
+        var tileSet = res[2];
+        var validMoveCount = 0;
+        var adjacents = current.movable;
+        for (var ai = 0; ai < adjacents.length; ai++) {
+          var adj = adjacents[ai];
+          var skipMt = adj.isMountain || adj.isCostlyNeutral;
+          var skipSearching = adj.player() === searchingPlayer;
+          var skipArmy = army - adj.army < 2;
+          var skipVisited = tileSet.has(adj) || negHas(negativeTiles, adj);
+          if (!(skipMt || skipSearching || skipArmy || skipVisited)) validMoveCount += 1;
+        }
+        if (validMoveCount > 0 && dist < maxDepth) return null;
+        return oldValFunc(current, prioVals);
+      };
+    }
+
+    if (searchingPlayer === -2) searchingPlayer = map.player_index;
+    var isDefaultPriority = priorityFunc === null || priorityFunc === undefined;
+    if (isDefaultPriority) priorityFunc = defaultPriorityFunc;
+
+    var frontier = new HeapQueue();
+    var globalVisitedSet = new Set();
+    var startList;
+    var i;
+
+    if (startTiles instanceof Map) {
+      startTiles.forEach(function (val, tile) {
+        var startVal = val[0];
+        var distance = val[1];
+        var l = [[tile, startVal]];
+        frontier.put([startVal, distance, tile, null, l, tile]);
+      });
+    } else {
+      if (!isDefaultPriority) {
+        throw new Error('yo you need to do the dictionary start if you are gonna pass a nonstandard priority func.');
+      }
+      for (i = 0; i < startTiles.length; i++) {
+        var tile = startTiles[i];
+        if (tile.isMountain) continue;
+        var dist = 0;
+        var negCityCount = 0;
+        var negEnemyTileCount = 0;
+        var negArmySum = 0;
+        var goalIncrement = 0;
+
+        if (!ignoreStartTile && tile.isCity) negCityCount = -1;
+        if (!ignoreStartTile && tile.player() !== searchingPlayer && tile.player() !== -1) negEnemyTileCount = -1;
+        if (!ignoreStartTile && tile.player() === searchingPlayer) negArmySum = 1 - tile.army;
+        else negArmySum = tile.army + 1;
+        if (!ignoreStartTile) {
+          if (tile.player() !== -1 && (tile.isCity || tile.isGeneral)) {
+            goalIncrement = 0.5;
+            if (tile.player() !== searchingPlayer) goalIncrement *= -1;
+          }
+        }
+
+        var startVal2 = [dist, negCityCount, negEnemyTileCount, negArmySum, tile.x, tile.y, goalIncrement];
+        startList = [[tile, startVal2]];
+        frontier.put([startVal2, dist, tile, null, startList, tile]);
+      }
+    }
+
+    var startTime = Date.now();
+    var iter = 0;
+    var foundDist = 1000;
+    var maxTime = opt(opts, 'maxTime', 0.2);
+
+    /* startTile -> Map(dist -> value/prioVals/endTile/nodeList)。key 用 Tile（对应原版 dict[Tile]）。 */
+    var maxValuesTMP = new Map();
+    var maxPriosTMP = new Map();
+    var maxListsTMP = new Map();
+    var endNodesTMP = new Map();
+
+    while (!frontier.empty) {
+      iter += 1;
+      if ((iter & 63) === 0) {
+        if ((Date.now() - startTime) / 1000 > maxTime || iter > maxIterations) break;
+      }
+
+      var node = frontier.get();
+      var prioVals = node[0];
+      var dist2 = node[1];
+      var current = node[2];
+      var parent = node[3];
+      var nodeList = node[4];
+      var startTile = node[5];
+
+      if (useGlobalVisitedSet) {
+        if (globalVisitedSet.has(current.tile_index)) continue;
+        globalVisitedSet.add(current.tile_index);
+        if (skipTiles && hasSkip(skipTiles, current)) continue;
+      }
+
+      var newValue = includePath ? valueFunc(current, prioVals, nodeList) : valueFunc(current, prioVals);
+
+      if (newValue !== null && newValue !== undefined) {
+        if (!maxValuesTMP.has(startTile)) {
+          maxValuesTMP.set(startTile, new Map());
+          maxPriosTMP.set(startTile, new Map());
+          endNodesTMP.set(startTile, new Map());
+          maxListsTMP.set(startTile, new Map());
+        }
+        var valuesForStart = maxValuesTMP.get(startTile);
+        var priosForStart = maxPriosTMP.get(startTile);
+        var endsForStart = endNodesTMP.get(startTile);
+        var listsForStart = maxListsTMP.get(startTile);
+
+        var maxMinusOne = valuesForStart.has(dist2 - 1) ? valuesForStart.get(dist2 - 1) : null;
+        var val = valuesForStart.has(dist2) ? valuesForStart.get(dist2) : null;
+        if ((val === null || isGreater(newValue, val)) && (maxMinusOne === null || isLess(maxMinusOne, newValue))) {
+          if (dist2 < foundDist) foundDist = dist2;
+          valuesForStart.set(dist2, newValue);
+          priosForStart.set(dist2, prioVals);
+          endsForStart.set(dist2, current);
+          listsForStart.set(dist2, nodeList);
+        }
+      }
+
+      if (dist2 >= maxDepth || nodeList.length > maxTurns) continue;
+      var nextDist = dist2 + 1;
+
+      var movable = current.movable;
+      for (var m = 0; m < movable.length; m++) {
+        var next = movable[m];
+        if (next === parent) continue;
+        if (
+          next.isMountain ||
+          (noNeutralCities && next.isCostlyNeutral) ||
+          (!next.discovered && next.isNotPathable)
+        ) {
+          continue;
+        }
+        if (globalVisitedSet.has(next.tile_index)) continue;
+        var nextPrio = includePath ? priorityFunc(next, prioVals, nodeList) : priorityFunc(next, prioVals);
+        if (nextPrio === null || nextPrio === undefined) continue;
+
+        if (boundFunc) {
+          var maxPrioDict = maxPriosTMP.get(startTile);
+          if (maxPrioDict) {
+            var maxPrioDist = maxPrioDict.has(nextDist - 1) ? maxPrioDict.get(nextDist - 1) : null;
+            if (maxPrioDist !== null) {
+              var bounded = includePath
+                ? boundFunc(next, nextPrio, maxPrioDist, nodeList)
+                : boundFunc(next, nextPrio, maxPrioDist);
+              if (bounded) continue;
+            }
+          }
+        }
+        if (skipFunc) {
+          var shouldSkip = includePath ? skipFunc(next, nextPrio, nodeList) : skipFunc(next, nextPrio);
+          if (shouldSkip) continue;
+        }
+
+        var newNodeList = nodeList.slice();
+        newNodeList.push([next, nextPrio]);
+        frontier.put([nextPrio, nextDist, next, current, newNodeList, startTile]);
+      }
+    }
+
+    if (foundDist >= 1000) return new Map();
+
+    var maxPaths = new Map();
+    var pathNegs = negativeTiles;
+    if (ignoreStartTile) {
+      pathNegs = new Set(negativeTiles);
+      if (startTiles instanceof Map) {
+        startTiles.forEach(function (v, st) {
+          pathNegs.add(st);
+        });
+      } else {
+        for (i = 0; i < startTiles.length; i++) pathNegs.add(startTiles[i]);
+      }
+    }
+
+    var matrixStart = priorityMatrixSkipStart ? 1 : 0;
+    var matrixEndOffset = priorityMatrixSkipEnd ? 0 : -1;
+
+    maxValuesTMP.forEach(function (valuesForStart, startTileOuter) {
+      var pathListForTile = [];
+      var listsForStartOuter = maxListsTMP.get(startTileOuter);
+      valuesForStart.forEach(function (valObj, dist3) {
+        var pathObject = newPath();
+        var maxList = listsForStartOuter.get(dist3);
+        for (var ti = 0; ti < maxList.length; ti++) {
+          var t = maxList[ti][0];
+          if (t !== null && t !== undefined) pathObject.add_next(t);
+        }
+
+        if (pathValueFunc) {
+          pathObject.value = pathValueFunc(pathObject, valObj);
+        } else {
+          pathObject.calculate_value(searchingPlayer, map.team_ids_by_player_index, pathNegs, ignoreNonPlayerArmy, ignoreIncrement, incrementBackward, false);
+          if (priorityMatrix) {
+            for (var pi = matrixStart; pi < pathObject.length - matrixEndOffset; pi++) {
+              pathObject.value += priorityMatrix.raw[pathObject.tileList[pi].tile_index];
+            }
+          }
+        }
+
+        if (pathObject.length === 0) return;
+        pathListForTile.push(pathObject);
+      });
+      maxPaths.set(startTileOuter, pathListForTile);
+    });
+
+    return maxPaths;
   }
 
   function breadth_first_dynamic_max_global_visited(map, startTiles, valueFunc, opts) {

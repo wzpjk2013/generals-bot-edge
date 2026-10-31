@@ -83,14 +83,18 @@ async function main() {
       stars: [0, 0]
     };
     await py.spawnIfNeeded();
-    await py.send({ cmd: 'start', dump: true, startData: {
+    const startPayload = {
       playerIndex: pySide,
       usernames: ['eklipz_py', 'them'],
       playerColors: ['#111111', '#222222'],
       replay_id: 'dump_' + seed,
       game_type: 'custom',
       options: {}
-    }, data: firstData });
+    };
+    // 首包也要落盘：ekdiff-move.js 复现决策序列时必须从这里起跑，
+    // 原版 Map.__init__ 吞首包一次，随后 turn 再灌一次，缺了就对不齐。
+    out.write(JSON.stringify({ start: true, startData: startPayload, data: firstData }) + '\n');
+    await py.send({ cmd: 'start', dump: true, startData: startPayload, data: firstData });
 
     for (let turn = 0; turn < maxTurns; turn++) {
       turns = turn + 1;

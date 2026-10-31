@@ -65,6 +65,14 @@
     return v === undefined ? null : v;
   }
 
+  /* PathWay.tiles 在 JS 是 Set（原版是 set），不能按数组用 indexOf */
+  function _setHas(coll, item) {
+    if (coll === null || coll === undefined) return false;
+    if (typeof coll.has === 'function') return coll.has(item);
+    if (Array.isArray(coll)) return coll.indexOf(item) >= 0;
+    return false;
+  }
+
   function _distLookup(lookup, dist) {
     if (lookup === null || lookup === undefined) return null;
     var v;
@@ -2110,7 +2118,7 @@
             if (
               canDie ||
               (bMapMoveable !== null && bMapChoke !== null && bMapMoveable > bMapChoke) ||
-              (!threat.path.tileSet.has(moveable) && threat.armyAnalysis.shortestPathWay.tiles.indexOf(moveable) < 0)
+              (!threat.path.tileSet.has(moveable) && !_setHas(threat.armyAnalysis.shortestPathWay.tiles, moveable))
             ) {
               blockInfo.add_blocked_destination(moveable);
             }

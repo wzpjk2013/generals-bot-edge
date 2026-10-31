@@ -1539,6 +1539,15 @@
     if (player === -2) player = tile.player();
 
     var teamScores = this.current_team_scores[currentCycleStats.team];
+    if (process.env.GB_EK_DEBUG) {
+      console.error('[dbg] _execute_emergence team=' + currentCycleStats.team
+        + ' scoresNull=' + (teamScores === null || teamScores === undefined)
+        + ' len=' + this.current_team_scores.length
+        + ' unique_teams=' + JSON.stringify(this.map.unique_teams)
+        + ' teamIndexes=' + JSON.stringify(this._team_indexes)
+        + ' players=' + JSON.stringify(currentCycleStats.players)
+        + ' tile=' + tile.tile_index + ' amt=' + emergence + ' player=' + player);
+    }
     var cityDistanceWasteApprox = Math.max(0, 3 * (teamScores.cityCount - 1)) - Math.max(0, 6 * (teamScores.cityCount - 2));
     var cityOffset = currentCycleStats.approximate_fog_city_army - cityDistanceWasteApprox;
     var teamTotalFogEmergenceEstAvailableTrue = currentCycleStats.approximate_fog_army_available_total_true + cityOffset;

@@ -45,6 +45,10 @@ class PyBot {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: Object.assign({}, process.env, { PYTHONUNBUFFERED: '1' })
     });
+    // 登记到全局表，进程异常退出时统一清场：原版 Python 一个进程能吃几个 G，
+    // 残留几个就能把机器拖死（用户踩过）。
+    LIVE.add(this.child);
+    this.child.on('exit', () => LIVE.delete(this.child));
     this.rl = readline.createInterface({ input: this.child.stdout });
     this.rl.on('line', (line) => {
       if (!this.pending) return;
@@ -114,16 +118,73 @@ class PyBot {
 
   kill() {
     if (this.child) {
+      const child = this.child;
+      this.child = null;
       try {
-        this.child.stdin.end();
-        this.child.kill();
+        child.stdin.end();
       } catch (e) {
         /* ignore */
       }
-      this.child = null;
+      try {
+        child.kill();
+      } catch (e) {
+        /* ignore */
+      }
+      LIVE.delete(child);
+      // Python 侧偶尔会卡在原生扩展里不响应 TERM；2 秒后按进程树强杀，
+      // 免得一轮擂台跑完机器上挂着一堆 python.exe。
+      const pid = child.pid;
+      if (pid) {
+        const t = setTimeout(() => {
+          try {
+            if (process.platform === 'win32') {
+              spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+            } else {
+              child.kill('SIGKILL');
+            }
+          } catch (e) {
+            /* ignore */
+          }
+        }, 2000);
+        t.unref();
+      }
     }
   }
 }
+
+/* 所有还活着的 Python 子进程。批量擂台（arena/refpk/ekdump）会开很多个，
+ * 出异常/被 Ctrl-C 时必须全部收掉，否则内存越跑越少直到死机。 */
+const LIVE = new Set();
+let liveHooked = false;
+function installLiveCleanup() {
+  if (liveHooked) return;
+  liveHooked = true;
+  const sweep = () => {
+    for (const child of LIVE) {
+      try {
+        child.kill();
+      } catch (e) {
+        /* ignore */
+      }
+    }
+    LIVE.clear();
+  };
+  process.on('exit', sweep);
+  process.on('SIGINT', () => {
+    sweep();
+    process.exit(130);
+  });
+  process.on('SIGTERM', () => {
+    sweep();
+    process.exit(143);
+  });
+  process.on('uncaughtException', (e) => {
+    sweep();
+    console.error(e && e.stack ? e.stack : e);
+    process.exit(1);
+  });
+}
+installLiveCleanup();
 
 /* diff 编码：整表替换 + 尾巴 0 截断（base/client/map.py 的 _apply_diff 就吃这个） */
 function fullDiff(values) {
@@ -245,6 +306,12 @@ async function playGamePy(seed, opponent, pySide, opts) {
         }
       }
       if (winner >= 0) break;
+
+      if (process.env.GB_PY_LAND && turn % 25 === 0) {
+        console.log('T' + turn + ' 地 ' + A.landCount(board, pySide) + ':' + A.landCount(board, 1 - pySide) +
+          ' 兵 ' + A.armyCount(board, pySide) + ':' + A.armyCount(board, 1 - pySide) +
+          ' 城 ' + A.cityCount(board, pySide) + ':' + A.cityCount(board, 1 - pySide));
+      }
 
       const t1 = turn + 1;
       const fast = process.env.GB_INCOME === 'fast';

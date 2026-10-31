@@ -462,7 +462,7 @@
 
         if (!include) continue;
 
-        added = new Set();
+        var added = new Set();
         var threatList = [];
         threatLookup.set(threatStart, threatList);
         if (

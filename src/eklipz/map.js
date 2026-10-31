@@ -122,6 +122,15 @@
     return d;
   };
 
+  /* 原版 DistanceMapperImpl 的 *_dual_cache 就是带缓存的同一个东西（map.py:2922-2925），
+   * 上层 easing 名字不同但语义一致，这里直接转调。 */
+  EKDistance.prototype.get_distance_between_dual_cache = function (a, b) {
+    return this.get_distance_between(a, b);
+  };
+  EKDistance.prototype.get_distance_between_or_none_dual_cache = function (a, b) {
+    return this.get_distance_between_or_none(a, b);
+  };
+
   EKDistance.prototype._build = function (startTile) {
     var dm = new MapMatrix(this.map, UNREACHABLE);
     var raw = dm.raw;
@@ -392,6 +401,52 @@
   };
   P.manhattan_dist = function (a, b) {
     return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+  };
+
+  /* base/client/map.py:euclidDist —— 大块扫描（generalApproximations / 叶子招法）用它挑最近格，
+   * 缺了 scan_map_for_large_tiles_and_leaf_moves 整条就断。torus 只在 wrap 地图生效。 */
+  P.euclidDist = function (x, y, x2, y2) {
+    var bestX = x;
+    var bestY = y;
+    var best;
+    if (this.has_torus) {
+      var stdX = Math.abs(x - x2);
+      best = stdX;
+      var xPlus = Math.abs(x - x2 + this.cols);
+      if (xPlus < best) { best = xPlus; bestX = x + this.cols; }
+      var xMinus = Math.abs(x2 - x + this.cols);
+      if (xMinus < best) { best = xMinus; bestX = x - this.cols; }
+
+      var stdY = Math.abs(y - y2);
+      best = stdY;
+      var yPlus = Math.abs(y - y2 + this.cols);
+      if (yPlus < best) { best = yPlus; bestY = y + this.cols; }
+      var yMinus = Math.abs(y2 - y + this.cols);
+      if (yMinus < best) { best = yMinus; bestY = y - this.cols; }
+    }
+    if (bestX === x2 && bestY === y2) return 0;
+    return Math.pow(Math.pow(Math.abs(bestX - x2), 2) + Math.pow(Math.abs(bestY - y2), 2), 0.5);
+  };
+
+  /* euclidDistExp：只用于比较，省掉开方 */
+  P.euclidDistExp = function (x, y, x2, y2) {
+    return Math.pow(this.euclidDist(x, y, x2, y2), 2);
+  };
+
+  P.euclidDistTile = function (a, b) {
+    return this.euclidDist(a.x, a.y, b.x, b.y);
+  };
+
+  /* 原版 Map.get_distance_between 一族（base/client/map.py:2922-2925）转调 distance_mapper，
+   * 上层（ExpansionOps / Targeting / CombatOps）大量用它们，缺了整条决策链直接断。 */
+  P.get_distance_between = function (a, b) {
+    return this.distance_mapper.get_distance_between_dual_cache(a, b);
+  };
+  P.get_distance_between_or_none = function (a, b) {
+    return this.distance_mapper.get_distance_between_or_none_dual_cache(a, b);
+  };
+  P.get_distance_matrix_including_obstacles = function (tile) {
+    return this.distance_mapper.get_tile_dist_matrix(tile);
   };
 
   Object.defineProperty(P, 'turn', {

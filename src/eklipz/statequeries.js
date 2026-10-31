@@ -33,9 +33,10 @@
     for (var i = 0; i < map.players.length; i++) {
       var player = map.players[i];
       if (player === bot.general.player()) continue;
-      if (bot.opponent_tracker.winning_on_army(1.2, player.index, -10, true)) {
+      // 原版签名是 (byRatio, useFullArmy, againstPlayer, offset)，别按关键字顺序猜
+      if (bot.opponent_tracker.winning_on_army(1.2, true, player.index, -10)) {
         dominating += 1;
-      } else if (!bot.opponent_tracker.winning_on_army(0.9, player.index, 0, true)) {
+      } else if (!bot.opponent_tracker.winning_on_army(0.9, true, player.index)) {
         dominatedBy += 1;
       }
     }
@@ -130,7 +131,7 @@
       if (tiles.size > limit) return true;
       if (
         map.is_tile_on_team_with(tile, player) ||
-        (includeNeutral && tile.isNeutral() && tile.army === 0 && !tile.isObstacle)
+        (includeNeutral && tile.isNeutral && tile.army === 0 && !tile.isObstacle)
       ) {
         tiles.add(tile);
       }

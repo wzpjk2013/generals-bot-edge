@@ -125,7 +125,7 @@
           if (
             defenseCriticalTileSet.has(nextMove.source) &&
             nextMove.source.army > 5 &&
-            !(isMoveListPath(bot.curPath) && nextMove.dest.isCity && nextMove.dest.isNeutral())
+            !(isMoveListPath(bot.curPath) && nextMove.dest.isCity && nextMove.dest.isNeutral)
           ) {
             bot.curPath = null;
             bot.curPathPrio = -1;
@@ -439,6 +439,9 @@
     if (avoidUsingExpandables === undefined) avoidUsingExpandables = true;
 
     var map = bm(bot);
+    // 原版 goal func 用 `tile in targets`，list/set 都能吃；JS 这里必须统一成 Set，
+    // 否则 cityops 传进来的数组会在 targets.has 上炸（.has is not a function）。
+    if (!(targets instanceof Set)) targets = new Set(targets || []);
     if (fromTile === null) fromTile = bot.general;
     if (negativeTiles !== null) negativeTiles = new Set(negativeTiles);
     if (skipEnemyCities) {
@@ -465,11 +468,12 @@
       }
     }
 
-    // 避开敌人视野：原版用 armyTracker.visible_tiles_by_player[player]（Set/List）
+    // 避开敌人视野：原版用 armyTracker.visible_tiles_by_player[player]（Python 是 MapMatrixSet，
+    // 迭代得出格子）；JS 侧同一字段也是 MapMatrixSet，必须走 toTiles，按 length/下标遍历会静默空转。
     if (avoidEnemyVision && bot.targetPlayer !== -1) {
       var vis = bot.armyTracker.visible_tiles_by_player[bot.targetPlayer];
       if (vis) {
-        var visArr = vis instanceof Set ? Array.from(vis) : vis;
+        var visArr = typeof vis.toTiles === 'function' ? vis.toTiles() : (vis instanceof Set ? Array.from(vis) : vis);
         for (var vi = 0; vi < visArr.length; vi++) avoidExpandables.set(visArr[vi].tile_index, 1);
       }
     }
@@ -507,7 +511,7 @@
       }
 
       if (negativeTiles === null || !negativeTiles.has(nextTile)) {
-        if (nextTile.isNeutral()) {
+        if (nextTile.isNeutral) {
           if (nextTile.army <= 0 || (nextTile.isCity && nextTile.army < bot.player.standingArmy)) {
             if (preferNeutral) {
               negEnemyTiles -= 0.5;
