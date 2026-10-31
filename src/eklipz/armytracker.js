@@ -65,6 +65,38 @@
     return arr[arr.length + idx >= 0 ? arr.length + idx : arr.length - 1];
   }
 
+  /*
+   * byPlayer 只能用在「拿得到返回值」的地方；`this.emergenceLocationMap[player]` 这种
+   * 裸下标有几十处，逐个改又容易漏。给按玩家建的数组套一层负下标代理，一次对齐
+   * Python 的 list[-1] 语义（读取取末元素，写入写末元素），其余属性原样透传。
+   */
+  function pyArray(arr) {
+    if (typeof Proxy !== 'function' || !arr) return arr;
+    return new Proxy(arr, {
+      get: function (target, prop, recv) {
+        if (typeof prop === 'string' && prop.length > 1 && prop.charAt(0) === '-') {
+          var n = Number(prop);
+          if (!isNaN(n) && n < 0) {
+            var k = target.length + n;
+            return target[k >= 0 ? k : target.length - 1];
+          }
+        }
+        return Reflect.get(target, prop, recv);
+      },
+      set: function (target, prop, value) {
+        if (typeof prop === 'string' && prop.length > 1 && prop.charAt(0) === '-') {
+          var n = Number(prop);
+          if (!isNaN(n) && n < 0) {
+            var k = target.length + n;
+            target[k >= 0 ? k : target.length - 1] = value;
+            return true;
+          }
+        }
+        return Reflect.set(target, prop, value);
+      }
+    });
+  }
+
   function isPlayerOnTeamWith(map, p1, p2) {
     return map.team_ids_by_player_index[p1] === map.team_ids_by_player_index[p2];
   }
@@ -378,6 +410,18 @@
     /* neutral 看不到任何东西，但索引 -1 要能安全访问 */
     this.seen_tiles_by_player.push(new MapMatrixSet(map));
     this.visible_tiles_by_player.push(new MapMatrixSet(map));
+    /* 套负下标代理：几十处裸下标（emergenceLocationMap[player] 等）一次对齐 py 语义 */
+    this.valid_general_positions_by_player = pyArray(this.valid_general_positions_by_player);
+    this.tiles_ever_owned_by_player = pyArray(this.tiles_ever_owned_by_player);
+    this.seen_tiles_by_player = pyArray(this.seen_tiles_by_player);
+    this.visible_tiles_by_player = pyArray(this.visible_tiles_by_player);
+    this.uneliminated_emergence_events = pyArray(this.uneliminated_emergence_events);
+    this.unrecaptured_emergence_events = pyArray(this.unrecaptured_emergence_events);
+    this.discovered_enemy_land_connector_tiles = pyArray(this.discovered_enemy_land_connector_tiles);
+    this.uneliminated_emergence_event_city_perfect_info = pyArray(
+      this.uneliminated_emergence_event_city_perfect_info
+    );
+    this.player_launch_timings = pyArray(this.player_launch_timings);
     for (var tIdx = 0; tIdx < this.map.tiles_by_index.length; tIdx++) {
       var t = this.map.tiles_by_index[tIdx];
       for (var vIdx = 0; vIdx < t.visibleTo.length; vIdx++) {
@@ -425,6 +469,7 @@
     this.fogPaths = [];
     this.emergenceLocationMap = [];
     for (i = 0; i < this.map.players.length; i++) this.emergenceLocationMap.push(new MapMatrix(this.map, 0.0));
+    this.emergenceLocationMap = pyArray(this.emergenceLocationMap);
 
     this.player_targets = [];
 
@@ -3265,7 +3310,7 @@
 
   P.limit_gen_position_from_emergence = function (p, tile, emergenceAmount) {
     if (emergenceAmount === undefined) emergenceAmount = -1;
-    var pLaunchTiming = this.player_launch_timings[tile.player()];
+    var pLaunchTiming = byPlayer(this.player_launch_timings, tile.player()) || 0;
 
     var maxDist = this.map.turn - pLaunchTiming;
     maxDist = Math.min(maxDist, p.tileCount - 1);
@@ -3378,7 +3423,9 @@
       }
     }
 
-    var playerUnelim = this.uneliminated_emergence_events[player];
+    // py 用 list[-1] 表示「最后一个玩家」，notify_concrete_emergence 会带 -1 进来
+    var playerUnelim = byPlayer(this.uneliminated_emergence_events, player);
+    if (!playerUnelim) return;
     var existingLimit = playerUnelim.has(tile) ? playerUnelim.get(tile) : null;
 
     if (existingLimit !== null && existingLimit <= maxDist) {
@@ -3404,8 +3451,13 @@
       playerUnelim.set(tile, maxDist);
       var cityPerfectInfo = overrideCityPerfectInfo;
       if (cityPerfectInfo === null) cityPerfectInfo = this.has_perfect_information_of_player_cities(player);
-      if (cityPerfectInfo) this.uneliminated_emergence_event_city_perfect_info[player].add(tile);
-      else this.uneliminated_emergence_event_city_perfect_info[player].delete(tile);
+      if (cityPerfectInfo) {
+        var cityPerfectSet = byPlayer(this.uneliminated_emergence_event_city_perfect_info, player);
+        if (cityPerfectSet) cityPerfectSet.add(tile);
+      } else {
+        var cityPerfectSet2 = byPlayer(this.uneliminated_emergence_event_city_perfect_info, player);
+        if (cityPerfectSet2) cityPerfectSet2.delete(tile);
+      }
     }
 
     if (elims > 0) this._check_over_elimination(player);
@@ -3427,7 +3479,8 @@
 
     var validSet = new Set();
 
-    var launchDist = Math.floor(this.player_launch_timings[player] / 2) + 1;
+    var playerLaunchTiming = byPlayer(this.player_launch_timings, player) || 0;
+    var launchDist = Math.floor(playerLaunchTiming / 2) + 1;
     launchDist = Math.max(9, launchDist);
     var emFactor = 50;
     var divOffset = 1;
@@ -3444,9 +3497,11 @@
       hasPerfectInfoOfPlayerCities = this.has_perfect_information_of_player_cities(player);
     }
 
-    var validPositions = this.valid_general_positions_by_player[player];
-    var emgMap = this.emergenceLocationMap[player];
-    var everOwned = this.tiles_ever_owned_by_player[player];
+    // 这几张表都是按玩家下标建的；py 侧 player 可以是 -1（中立格涌现），list[-1] 取末项
+    var validPositions = byPlayer(this.valid_general_positions_by_player, player);
+    var emgMap = byPlayer(this.emergenceLocationMap, player);
+    var everOwned = byPlayer(this.tiles_ever_owned_by_player, player);
+    if (!validPositions || !emgMap || !everOwned) return 0;
 
     var limiter;
     if (alsoIncreaseEmergence) {
@@ -3637,7 +3692,8 @@
           validGenPos.raw[t2.tile_index] = true;
         }
       }
-      var playerEvents = this.uneliminated_emergence_events[player];
+      var playerEvents = byPlayer(this.uneliminated_emergence_events, player);
+      if (!playerEvents) return;
       var entries = Array.from(playerEvents.entries());
       for (var e = 0; e < entries.length; e++) playerEvents.set(entries[e][0], entries[e][1] + 2);
       this.re_limit_player_gen_locations(player, playerEvents);
@@ -3953,10 +4009,14 @@
 
   P.get_fog_connected_based_on_emergences = function (player, predictedGeneralLocation, additionalRequiredTiles) {
     var self = this;
-    var tilesEverOwned = this.tiles_ever_owned_by_player[player];
-    var uneliminated = this.uneliminated_emergence_events[player];
-    var unrecapturedEmergenceEvents = this.unrecaptured_emergence_events[player];
-    var validGenSpots = this.valid_general_positions_by_player[player];
+    var tilesEverOwned = byPlayer(this.tiles_ever_owned_by_player, player);
+    var uneliminated = byPlayer(this.uneliminated_emergence_events, player);
+    var unrecapturedEmergenceEvents = byPlayer(this.unrecaptured_emergence_events, player);
+    var validGenSpots = byPlayer(this.valid_general_positions_by_player, player);
+    if (!tilesEverOwned || !uneliminated || !validGenSpots) {
+      // 调用点按四元组解构（banned/connected/core/path），兜底也要给同形状的空值
+      return [new MapMatrixSet(this.map), new Set(), new Set(), new Map()];
+    }
     var teamStats = getTeamStats(this.map, player);
     var perfectInfo = teamStats.cityCount === teamStats.teamPlayers.length;
     var bannedTiles = new MapMatrixSet(this.map);

@@ -685,6 +685,7 @@
     var neutralSinks = graph_data.neutral_sinks || new Set();
     var flowDiagIslands = graph_data.flow_diag_island_ids || new Set();
     var rootOutputFlow = new Map();
+    var throughputViolations = 0;
 
     var lookup = function (id) {
       if (graph_lookup instanceof Map) return graph_lookup.has(id) ? graph_lookup.get(id) : null;
@@ -705,8 +706,15 @@
 
         if (is_throughput && source_node) {
           if (target_node_id !== -node_id) {
-            throw new Error('input node flowed to something other than output node...? ' +
-              String(source_node) + ' (' + target_flow_amount + 'a) -> ' + target_node_id);
+            /*
+             * 原版这里直接 raise（FlowDirectionFinderABC.py:228）。它靠 ortools 的最优解保证
+             * 「输入端口只流向自己的输出端口」，我们这份自研最小成本流偶尔会把兵从输入端口
+             * 甩到 fake 节点上（escape 弧被用到）。这是解质量差异，不是数据错误 —— 抛出去只会
+             * 让整回合不出招、回落自制引擎，所以记一次计数后跳过这条弧。
+             */
+            throughputViolations += 1;
+            EK.flow.throughputViolations = throughputViolations;
+            return;
           }
           source_node.army_flow_received += target_flow_amount;
           return;

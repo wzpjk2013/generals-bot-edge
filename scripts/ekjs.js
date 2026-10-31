@@ -60,6 +60,12 @@ function loadEK() {
     if (skipToExport[m]) delete EK[skipToExport[m]];
   }
   if (!EK || !EK.Bot) throw new Error('eklipz 模块没挂上（global.__EK 无 Bot）');
+  // 时间预算切片是唯一的不确定源：真实时钟下同一 seed 两次跑会走到不同分支，
+  // 定位这类随机崩溃时用 GB_EK_FIXED_TIME=0 冻结时钟（0 = 时间永远够用，搜到底）。
+  if (process.env.GB_EK_FIXED_TIME !== undefined && EK.EarlyExpandUtils
+    && typeof EK.EarlyExpandUtils.set_fixed_now === 'function') {
+    EK.EarlyExpandUtils.set_fixed_now(Number(process.env.GB_EK_FIXED_TIME));
+  }
   return EK;
 }
 
