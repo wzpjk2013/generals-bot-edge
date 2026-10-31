@@ -72,6 +72,9 @@
     this.turn = 0;
     this.generals = [];
     this.cities = [];
+    // 服务器每帧都发 scores（所有玩家的真实总分/地数/死活），引擎的胜率判断全靠它：
+    // 自己用迷雾算只能算到自己看得见的格子，会把对手低估成 0。
+    this.scores = null;
     this.teams = [];
     this.usernames = [];
     this.gameType = '';
@@ -104,6 +107,7 @@
     if (msg && Array.isArray(msg.usernames)) this.usernames = msg.usernames.slice();
     if (msg && Array.isArray(msg.teams)) this.teams = msg.teams.slice();
     if (msg && Array.isArray(msg.generals)) this.generals = msg.generals.slice();
+    if (msg && Array.isArray(msg.scores)) this.scores = msg.scores.slice();
     if (msg && Array.isArray(msg.cities)) {
       this.cities = msg.cities.slice();
       this.rawCities = this.cities.slice();
@@ -123,6 +127,7 @@
     if (Number.isInteger(msg.turn)) this.turn = msg.turn;
     if (Array.isArray(msg.usernames)) this.usernames = msg.usernames.slice();
     if (Array.isArray(msg.generals)) this.generals = msg.generals.slice();
+    if (Array.isArray(msg.scores)) this.scores = msg.scores.slice();
     if (msg.ended || msg.game_over) this.ended = true;
 
     if (Array.isArray(msg.map)) {

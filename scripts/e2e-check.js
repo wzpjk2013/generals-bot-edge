@@ -47,6 +47,17 @@ const manifestVersion = JSON.parse(fs.readFileSync(path.join(EXT, 'manifest.json
     report.page = await evaluate(cdp, 'location.href');
     report.stubbed = net.offline;
     report.gb = await evaluate(cdp, 'typeof window.__GB === "object" && !!window.__GB.bot');
+    // 移植版引擎：模块装载 + 驱动层就位。这两个是 1.2.0 的关键路径 ——
+    // 缺一个就等于装了个旧扩展（面板照样在，但跑的是老引擎）。
+    report.ek = await evaluate(
+      cdp,
+      'typeof window.__EK === "object" && !!window.__EK.Bot && !!window.__EK.ArmyFlowExpanderV2'
+    );
+    report.ekrun = await evaluate(
+      cdp,
+      '!!window.__GB && typeof window.__GB.ekbot === "object" && typeof window.__GB.ekbot.plan === "function"'
+    );
+    report.ekmods = await evaluate(cdp, 'Object.keys(window.__EK || {}).length');
     report.panel = await evaluate(cdp, '!!document.getElementById("gb-autopilot-host")');
     report.version = await evaluate(cdp, panel('ver'));
     report.status = await evaluate(cdp, panel('st'));
@@ -130,6 +141,11 @@ const manifestVersion = JSON.parse(fs.readFileSync(path.join(EXT, 'manifest.json
 
     const problems = [];
     if (!report.gb) problems.push('window.__GB 不在：MAIN world 脚本没执行');
+    if (!report.ek) problems.push('window.__EK 缺 Bot / ArmyFlowExpanderV2：移植版模块没加载完');
+    if (!report.ekrun) problems.push('window.__GB.ekbot 不在：src/ekrun.js 没跑起来');
+    if (typeof report.ekmods === 'number' && report.ekmods < 60) {
+      problems.push('__EK 导出只有 ' + report.ekmods + ' 个：manifest 的脚本清单漏了模块');
+    }
     if (!report.panel) problems.push('面板没挂上');
     if (report.version !== 'v' + manifestVersion) {
       problems.push('版本号应为 v' + manifestVersion + '，实际 ' + JSON.stringify(report.version) + '（扩展没重载？）');

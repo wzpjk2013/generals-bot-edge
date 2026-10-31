@@ -26,6 +26,8 @@
   var settings = {
     enabled: true,
     maxMoves: 1,
+    // 'ek' = EklipZ 移植版（默认），'gb' = 早期自制引擎（保底对照）
+    engine: 'ek',
     // 面板位置（拖过才有；null = 默认右上角）和折叠状态，都存在 chrome.storage 里，
     // 刷新页面 / 换一局都不会跳回去。
     pos: null,
@@ -117,7 +119,10 @@
 
     var moves;
     try {
-      moves = GB.bot.plan(S, settings);
+      // ek 引擎 = EklipZ（Human.exe）逐行移植版，src/ekrun.js 里做协议适配；
+      // 老的自制引擎保留为回退，settings.engine = 'gb' 时用它。
+      var engine = (settings.engine === 'gb') ? GB.bot : (GB.ekbot || GB.bot);
+      moves = engine.plan(S, settings);
     } catch (e) {
       stats.error = String((e && e.message) || e);
       log('plan failed', e);
@@ -154,7 +159,11 @@
   var handlers = {
     game_start: function (m) {
       state.applyStart(m);
+      // 换局必须把 ek 引擎一起清掉：ArmyTracker 的迷雾推断会带着上一局的臆测值，
+      // 新图第一格就对不上（表现为开局四处乱撞）。
+      if (GB.ekbot && GB.ekbot.reset) GB.ekbot.reset();
       lastDrive.turn = -1;
+      lastTurnSeen = -1;
       stats.last = '-';
       stats.error = '';
     },

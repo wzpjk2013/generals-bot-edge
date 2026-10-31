@@ -1,22 +1,81 @@
 {
   "manifest_version": 3,
   "name": "Generals AutoPilot",
-  "version": "1.1.10",
-  "description": "generals.io 自动决策与自动移动：解析对局状态、跑决策引擎、通过官方 socket 下发 attack。",
+  "version": "1.2.0",
+  "description": "generals.io 自动决策与自动移动：EklipZ（Human.exe）引擎逐行移植，解析对局状态、跑决策、通过官方 socket 下发 attack。",
   "minimum_chrome_version": "111",
-  "permissions": ["storage"],
-  "host_permissions": ["https://generals.io/*"],
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://generals.io/*"
+  ],
   "content_scripts": [
     {
-      "matches": ["https://generals.io/*"],
+      "matches": [
+        "https://generals.io/*"
+      ],
       "run_at": "document_start",
       "world": "MAIN",
-      "js": ["src/state.js", "src/flow.js", "src/bot.js", "src/hook.js"]
+      "js": [
+        "src/eklipz/pyrandom.js",
+        "src/eklipz/tile.js",
+        "src/eklipz/mapmatrix.js",
+        "src/eklipz/search.js",
+        "src/eklipz/path.js",
+        "src/eklipz/map.js",
+        "src/eklipz/mapmove.js",
+        "src/eklipz/nx.js",
+        "src/eklipz/armyanalyzer.js",
+        "src/eklipz/territory.js",
+        "src/eklipz/board.js",
+        "src/eklipz/danger.js",
+        "src/eklipz/city.js",
+        "src/eklipz/armytracker.js",
+        "src/eklipz/opponenttracker.js",
+        "src/eklipz/tileisland.js",
+        "src/eklipz/gather.js",
+        "src/eklipz/expandutils.js",
+        "src/eklipz/earlyexpandutils.js",
+        "src/eklipz/timings.js",
+        "src/eklipz/killtiming.js",
+        "src/eklipz/expansionops.js",
+        "src/eklipz/combatops.js",
+        "src/eklipz/gatherops.js",
+        "src/eklipz/cityops.js",
+        "src/eklipz/targeting.js",
+        "src/eklipz/interceptor.js",
+        "src/eklipz/defense.js",
+        "src/eklipz/explorationops.js",
+        "src/eklipz/centraldefense.js",
+        "src/eklipz/wincondition.js",
+        "src/eklipz/comms.js",
+        "src/eklipz/rendering.js",
+        "src/eklipz/pathing.js",
+        "src/eklipz/repetition.js",
+        "src/eklipz/statequeries.js",
+        "src/eklipz/flowmodels.js",
+        "src/eklipz/flowgraph.js",
+        "src/eklipz/flowmincost.js",
+        "src/eklipz/flowknapsack.js",
+        "src/eklipz/flowexpansion.js",
+        "src/eklipz/expandhooks.js",
+        "src/eklipz/botmain.js",
+        "src/state.js",
+        "src/flow.js",
+        "src/bot.js",
+        "src/ekrun.js",
+        "src/hook.js"
+      ]
     },
     {
-      "matches": ["https://generals.io/*"],
+      "matches": [
+        "https://generals.io/*"
+      ],
       "run_at": "document_start",
-      "js": ["src/bridge.js"]
+      "js": [
+        "src/bridge.js"
+      ]
     }
   ]
 }
