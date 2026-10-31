@@ -37,7 +37,7 @@ const MODULES = [
   'armytracker', 'opponenttracker', 'tileisland', 'gather', 'mapspanning', 'watchman',
   'expandutils', 'earlyexpandutils', 'timings', 'killtiming',
   'expansionops', 'combatops', 'gatherops', 'cityops', 'targeting',
-  'interceptor', 'defense', 'explorationops', 'centraldefense',
+  'interceptor', 'defense', 'explorationops', 'centraldefense', 'eventhandlers',
   'wincondition', 'comms', 'rendering', 'pathing', 'repetition',
   'statequeries',
   'flowmodels', 'flowgraph', 'flowmincost', 'flowknapsack', 'flowexpansion',

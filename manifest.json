@@ -50,6 +50,7 @@
         "src/eklipz/defense.js",
         "src/eklipz/explorationops.js",
         "src/eklipz/centraldefense.js",
+        "src/eklipz/eventhandlers.js",
         "src/eklipz/wincondition.js",
         "src/eklipz/comms.js",
         "src/eklipz/rendering.js",

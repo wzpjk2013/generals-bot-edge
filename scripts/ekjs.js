@@ -32,7 +32,7 @@ const MODULES = [
   'armyanalyzer', 'territory', 'board', 'danger', 'city',
   'armytracker', 'opponenttracker', 'tileisland', 'gather', 'mapspanning', 'watchman',
   'expandutils', 'earlyexpandutils', 'expansionops', 'combatops', 'gatherops',
-  'targeting', 'interceptor', 'defense', 'centraldefense', 'pathing', 'repetition', 'statequeries',
+  'targeting', 'interceptor', 'defense', 'centraldefense', 'eventhandlers', 'pathing', 'repetition', 'statequeries',
   'timings', 'killtiming', 'cityops', 'wincondition', 'comms', 'rendering',
   'explorationops',
   // 迭代流扩张：models 先于求解器，flowgraph 提供有向图与 A/BC，flowmincost 是
@@ -102,6 +102,18 @@ function startDataFor(board, me) {
   };
 }
 
+/* 为什么回放器要区分非法招的原因：applyMove 只回 bool，出招被吞掉时看不出是
+ * 「兵不够 / 不是自己的格 / 目标不是邻居」哪一类，擂台统计就没法定位。 */
+function illegalReason(board, me, mv) {
+  const from = mv[0];
+  const to = mv[1];
+  if (board.owner[from] !== me) return 'notOwned(owner=' + board.owner[from] + ')';
+  if (board.armies[from] < 2) return 'army1';
+  if (from === to) return 'sameTile';
+  if (board.mountains[to]) return 'mountain';
+  return 'notAdjacent';
+}
+
 function updatePacket(board, turn, st) {
   return {
     turn: turn,
@@ -153,6 +165,11 @@ class EkBot {
       // 原版线上 rethrow=False：这回合不出招，别把整局打废
       this.errors++;
       this.lastError = e && e.message ? e.message : String(e);
+      // 没有栈就只能看到最后一条消息，分不清是哪一路分支抛的
+      if (!this.firstError) {
+        this.firstError = this.lastError;
+        this.firstStack = (e && e.stack) || '';
+      }
       if (process.env.GB_EK_RAISE) { this.lastStack = e && e.stack; throw e; }
       move = null;
     }
@@ -210,11 +227,11 @@ function playGameEk(seed, opponent, ekSide, opts) {
         const mv = ek.turn(updatePacket(board, turn + 1, st));
         if (mv) {
           const okMove = A.applyMove(board, p, mv[0], mv[1], mv[2]);
-          if (!okMove) illegal.push([turn, mv]);
+          if (!okMove) illegal.push([turn, mv, illegalReason(board, p, mv)]);
           if (opts.trace) {
             console.log('T' + turn + ' ek ' + (mv[0] % W) + ',' + Math.floor(mv[0] / W) +
               '>' + (mv[1] % W) + ',' + Math.floor(mv[1] / W) + (mv[2] ? ' half' : '') +
-              (okMove ? '' : ' [非法]'));
+              (okMove ? '' : ' [非法 ' + illegal[illegal.length - 1][2] + ']'));
           }
         } else if (opts.trace) {
           console.log('T' + turn + ' ek 过');
@@ -270,7 +287,10 @@ function playGameEk(seed, opponent, ekSide, opts) {
     ekMs: ek.turnMs,
     ekErrors: ek.errors,
     ekLastError: ek.lastError,
+    ekFirstError: ek.firstError,
+    ekFirstStack: ek.firstStack,
     illegal: illegal.length,
+    illegalList: illegal,
     idle: idle,
     missing: ek.missing
   };
@@ -332,6 +352,16 @@ function main() {
     'ms  出招异常 ' + errs + '  非法招 ' + bad + '  墙钟 ' + ((Date.now() - t0) / 1000).toFixed(0) + 's');
   const lastErr = results.find((r) => r.ekLastError);
   if (lastErr) console.log('  最近一次异常：' + lastErr.ekLastError);
+  /* 非法招按原因聚合：同一原因反复出现说明是引擎侧系统性偏差，不是偶发 */
+  if (bad > 0) {
+    const why = {};
+    for (const r of results) for (const it of (r.illegalList || [])) why[it[2]] = (why[it[2]] || 0) + 1;
+    console.log('  非法招原因：' + JSON.stringify(why));
+    const one = results.find((r) => r.illegalList && r.illegalList.length);
+    if (one) console.log('  首个非法招：' + JSON.stringify(one.illegalList[0]));
+  }
+  const firstErr = results.find((r) => r.ekFirstStack);
+  if (firstErr) console.log('  首次异常栈：\n' + firstErr.ekFirstStack);
   const missing = results.find((r) => r.missing && Object.keys(r.missing).length);
   if (missing) console.log('  缺失依赖：' + JSON.stringify(missing.missing));
 }

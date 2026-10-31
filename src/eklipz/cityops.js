@@ -1861,7 +1861,9 @@
 
     if (targets.length === 0) {
       var possibleGens = call('BotTargeting', 'get_target_player_possible_general_location_tiles_sorted',
-        [bot, 7, 0.5], []);
+        // py 是关键字调用 elimNearbyRange=7, cutoffEmergenceRatio=0.5；第 3 位必须留空给 player，
+        // 否则 0.5 会被当成玩家下标，map.players[0.5] === undefined（表现为 reading 'general'）
+        [bot, 7, undefined, 0.5], []);
       targets = toArr(possibleGens).slice(0, 3);
     }
 

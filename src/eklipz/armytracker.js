@@ -55,10 +55,19 @@
     return map.players[map.players.length + idx];
   }
 
+  /*
+   * 按玩家索引的数组（unrecaptured_emergence_events / emergenceLocationMap 等）同样是
+   * Python 负索引语义：player 可能是 -1（中立格作为「涌现来源」），原文就落到最后一个元素。
+   */
+  function byPlayer(arr, idx) {
+    if (!arr || arr.length === 0) return undefined;
+    if (idx >= 0) return arr[idx];
+    return arr[arr.length + idx >= 0 ? arr.length + idx : arr.length - 1];
+  }
+
   function isPlayerOnTeamWith(map, p1, p2) {
     return map.team_ids_by_player_index[p1] === map.team_ids_by_player_index[p2];
   }
-
   function ownsTilePlayer(map, p) {
     return p === map.player_index || map.teammates.has(p);
   }
@@ -1462,11 +1471,15 @@
 
   P.notify_concrete_emergence = function (maxDist, emergingTile, confidentFromGeneral) {
     var player = emergingTile.player();
-    this.unrecaptured_emergence_events[player].add(emergingTile);
+    // py 可以是 -1（中立格当作涌现来源），负索引落到最后一个玩家；JS 原样取会拿到 undefined
+    var unrecaptured = byPlayer(this.unrecaptured_emergence_events, player);
+    if (unrecaptured) unrecaptured.add(emergingTile);
     this._limit_general_position_to_within_tile_and_distance(player, emergingTile, maxDist, false, true, confidentFromGeneral, -1, false);
+    var emgMap = byPlayer(this.emergenceLocationMap, player);
+    if (!emgMap) return;
     if (confidentFromGeneral) {
       var tiles = this.map.get_all_tiles();
-      for (var i = 0; i < tiles.length; i++) this.emergenceLocationMap[player].raw[tiles[i].tile_index] /= 5.0;
+      for (var i = 0; i < tiles.length; i++) emgMap.raw[tiles[i].tile_index] /= 5.0;
     }
 
     var incTiles = [];
@@ -2916,7 +2929,12 @@
       }
     }
 
-    var forPlayerRequiredConnected = this.player_connected_tiles[forPlayer];
+    // ArmyTracker.py:3149 —— Python 的 player_connected_tiles[-1] 取的是**最后一个玩家**的连通集，
+    // JS 的负下标只会得到 undefined（曾表现为 drop_incorrect_player_fog_around 里 reading 'has'）
+    var forPlayerRequiredConnected = forPlayer < 0
+      ? this.player_connected_tiles[this.player_connected_tiles.length - 1]
+      : this.player_connected_tiles[forPlayer];
+    if (!forPlayerRequiredConnected) forPlayerRequiredConnected = new Set();
 
     q.push([-1, neutralTile]);
 

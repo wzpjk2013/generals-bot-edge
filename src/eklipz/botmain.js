@@ -104,11 +104,24 @@
     // History.py:26 —— dropped_move 会把「上一回合的招被服务器吞了」记在这里，
     // 重复出招检测靠它区分「玩家长按同一个方向」和「我们以为出了招」
     this.droppedHistory = {};
+    // History.py:23 —— BotEventHandlers.handle_player_captures 会往里追加
+    this.player_captures = [];
   }
   History.prototype.get_move = function (turn) {
     var l = this.move_history[turn];
     return l && l.length > 0 ? l[0] : null;
   };
+  // History.py:35
+  History.prototype.captured_player = function (turn, capturedPlayer, capturingPlayer) {
+    this.player_captures.push(new PlayerCapture(turn, capturedPlayer, capturingPlayer));
+  };
+
+  // History.py:57 PlayerCapture
+  function PlayerCapture(turn, capturedPlayer, capturingPlayer) {
+    this.turn = turn;
+    this.capturedPlayer = capturedPlayer;
+    this.capturingPlayer = capturingPlayer;
+  }
 
   // StrategyModels.py ExpansionPotential：只有字段，逻辑在 BotExpansionOps 里
   function ExpansionPotential(econValue, turnsUsed, armyRemaining, selectedOption, allPaths, valuePerTurn, turnCreated, includesIntercept) {
@@ -547,13 +560,13 @@
     this.has_watchtower_modifier = !!map.modifiers_by_id[13];
     this.has_misty_veil_modifier = !!map.modifiers_by_id[9];
 
-    // map 回调 —— 原版注册到 map.notify_*；JS 的 Map 目前没有这套回调，记录下来
+    // map 回调 —— 原版在 bot_ek0x45.py:2059-2069 注册，这里必须等
+    // armyTracker / territories / board_analysis 都建好之后才能挂（见下方 BotEventHandlers.initialize_callbacks）
     if (map.notify_city_found === undefined) noteMissing('map.notify_city_found callback');
     if (map.notify_tile_captures === undefined) noteMissing('map.notify_tile_captures callback');
     if (map.notify_tile_discovered === undefined) noteMissing('map.notify_tile_discovered callback');
     if (map.notify_tile_vision_changed === undefined) noteMissing('map.notify_tile_vision_changed callback');
     if (map.notify_player_captures === undefined) noteMissing('map.notify_player_captures callback');
-    noteMissing('BotEventHandlers.initialize_callbacks');
 
     if (!this.territories) this.territories = new EK.TerritoryClassifier(map);
 
@@ -584,6 +597,14 @@
 
     var CLT = EK.CaptureLineTracker;
     this.capture_line_tracker = CLT ? new CLT(map) : new CaptureLineTracker(map);
+
+    // bot_ek0x45.py:2059-2069 —— 到这一步 armyTracker / territories / board_analysis /
+    // win_condition_analyzer / cityAnalyzer 全部就位，回调里用到的东西都有了
+    if (EK.BotEventHandlers && typeof EK.BotEventHandlers.initialize_callbacks === 'function') {
+      EK.BotEventHandlers.initialize_callbacks(this);
+    } else {
+      noteMissing('BotEventHandlers.initialize_callbacks');
+    }
 
     this._timing_cycle_ended();
 

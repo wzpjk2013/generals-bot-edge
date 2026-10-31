@@ -138,6 +138,8 @@
     if (asPlayer === undefined) asPlayer = -2;
     var map = mapOf(bot);
     if (asPlayer === -2) asPlayer = map.player_index;
+    // BotGatherOps.py:39 —— 原版在这里就挡掉空树，否则 foreach_tree_node 会 slice 到 null
+    if (gatherNodes === null || gatherNodes === undefined || gatherNodes.length === 0) return 0;
     var sumCaps = { value: 0 };
     EK.GatherTreeNode.foreach_tree_node(gatherNodes, function (n) {
       if (!map.is_tile_on_team_with(n.tile, asPlayer) && n.children && n.children.length > 0) {
