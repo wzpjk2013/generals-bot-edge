@@ -35,6 +35,7 @@ const MODULES = [
   'tile', 'mapmatrix', 'search', 'path', 'map', 'mapmove', 'nx',
   'armyanalyzer', 'territory', 'board', 'danger', 'city',
   'armytracker', 'opponenttracker', 'tileisland', 'gather', 'mapspanning', 'watchman',
+  'gatherprune', 'botqueries',
   'expandutils', 'earlyexpandutils', 'timings', 'killtiming',
   'expansionops', 'combatops', 'gatherops', 'cityops', 'targeting',
   'interceptor', 'defense', 'explorationops', 'centraldefense', 'eventhandlers',
@@ -125,7 +126,10 @@ function main() {
   const startPacket = startRec ? startRec.data : firstTurnRec.data;
 
   const map = new ek.Map(startData, startPacket, { shuffle: false });
-  map.apply_server_update(startPacket);
+  // 只有 dump 里带 start 记录时，第一个 data 才是"被 Map.__init__ 吞过一次的开局包"，
+  // 这时要补吞一次对齐 py 的 Map.__init__ 语义；没有 start 记录的 dump（cA~cD、gA2、
+  // g3000 等）第一条就是 turn1 的真实包，再吞一次等于把 T1 应用两遍，全盘错位。
+  if (startRec) map.apply_server_update(startPacket);
   const bot = new ek.Bot(startData);
   bot.initialize_from_map_for_first_time(map);
 
@@ -134,6 +138,9 @@ function main() {
   let skipped = 0;
   const diffs = [];
 
+  // 没有 start 记录的旧 dump（gA2/g3000/g5000/g1000）：录制器当时没有把开局包单独落盘，
+  // 那个包既被 Map.__init__ 吞过又被第一次 turn 重发，所以 JS 侧也要再应用一次才能对齐。
+  // 有 start 记录的 dump（gm1 之后）走上面 startPacket 那条路，同理会补应用一次。
   for (const rec of recs) {
     if (rec.start) continue;
     const turn = rec.turn;

@@ -254,7 +254,9 @@
     var targetArmy = ot.get_approximate_fog_army_risk(enPlayer, null, fogDefenseTurns);
 
     var tilesArr = Array.isArray(targetTiles) ? targetTiles : Array.from(targetTiles);
-    var genReachable = EK.search.build_distance_map_matrix_with_skip(map, tilesArr, map.visible_tiles, fogReachTurns);
+    // 原版这里只传 skipTiles，maxDepth 走默认 1000；把 fogReachTurns 当 maxDepth 传
+    // 会让距离超过 fogReachTurns 的格子根本进不了矩阵，被当成「够不着」而多扣防守兵力。
+    var genReachable = EK.search.build_distance_map_matrix_with_skip(map, tilesArr, map.visible_tiles, 1000);
 
     var armies = bot.armyTracker ? bot.armyTracker.armies : null;
     if (armies) {

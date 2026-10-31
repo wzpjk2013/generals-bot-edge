@@ -31,6 +31,7 @@ const MODULES = [
   'tile', 'mapmatrix', 'search', 'path', 'map', 'mapmove', 'nx',
   'armyanalyzer', 'territory', 'board', 'danger', 'city',
   'armytracker', 'opponenttracker', 'tileisland', 'gather', 'mapspanning', 'watchman',
+  'gatherprune', 'botqueries',
   'expandutils', 'earlyexpandutils', 'expansionops', 'combatops', 'gatherops',
   'targeting', 'interceptor', 'defense', 'centraldefense', 'eventhandlers', 'pathing', 'repetition', 'statequeries',
   'timings', 'killtiming', 'cityops', 'wincondition', 'comms', 'rendering',
