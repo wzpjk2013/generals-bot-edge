@@ -774,7 +774,9 @@
       }
 
       if (!this.history.move_history[turn]) this.history.move_history[turn] = [];
-      this.history.move_history[turn].push(move);
+      // py 里历史项只会是 Move 或 None；JS 侧 select_move 有分支 return undefined，
+      // 记成 undefined 会让 BotRepetition 读 .dest 时抛，这里统一折成 None。
+      this.history.move_history[turn].push(move === undefined ? null : move);
 
       _call(this, 'BotRendering', 'prep_view_info_for_render', [this, move], null);
     }

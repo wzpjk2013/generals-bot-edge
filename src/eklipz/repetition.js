@@ -17,6 +17,13 @@
     return hist instanceof Map ? Array.from(hist.values()).flat() : hist;
   }
 
+  /* py 里历史项可以是 None（这回合没出招）；JS 侧还会出现 undefined ——
+   * find_move 的某些分支返回 undefined 而不是 null，只判 !== null 会漏过去，
+   * 接着读 .dest 就抛 "Cannot read properties of undefined (reading 'dest')"。 */
+  function isMove(m) {
+    return m !== null && m !== undefined && typeof m === 'object';
+  }
+
   function droppedAt(bot, turn) {
     var d = bot.history.droppedHistory;
     if (d instanceof Set) return d.has(turn);
@@ -39,9 +46,9 @@
       for (var mi = 0; mi < history.length; mi++) {
         var lastMove = history[mi];
         if (
-          prevMove !== null &&
+          isMove(prevMove) &&
           !droppedAt(bot, turn) &&
-          lastMove !== null &&
+          isMove(lastMove) &&
           ((lastMove.dest === prevMove.source && lastMove.source === prevMove.dest) ||
             (lastMove.source === prevMove.source && lastMove.dest === prevMove.dest))
         ) {
@@ -68,7 +75,7 @@
         var oldMove = oldMoves[mi];
         if (
           !droppedAt(bot, turn) &&
-          oldMove !== null &&
+          isMove(oldMove) &&
           ((oldMove.dest === move.source && oldMove.source === move.dest) ||
             (oldMove.source === move.source && oldMove.dest === move.dest))
         ) {
@@ -92,7 +99,7 @@
       if (oldMoves === null) continue;
       for (var mi = 0; mi < oldMoves.length; mi++) {
         var oldMove = oldMoves[mi];
-        if (!droppedAt(bot, turn) && oldMove !== null && oldMove.dest === tile) {
+        if (!droppedAt(bot, turn) && isMove(oldMove) && oldMove.dest === tile) {
           reps += 1;
           if (reps === numReps) return true;
         }

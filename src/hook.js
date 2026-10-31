@@ -677,6 +677,7 @@
         tip += ' / ek 错误数 ' + ekst.errors +
           (ekst.lastError ? '（' + ekst.lastError + (ekst.lastFrame ? ' @ ' + ekst.lastFrame : '') + '）' : '');
         if (stats.ekFallback) tip += ' / 回落自制引擎 ' + stats.ekFallback + ' 次';
+        if (ekst.undefMoves) tip += ' / ek 空值招 ' + ekst.undefMoves + ' 次';
       }
       if (stats.passRun) tip += ' / 连续空过 ' + stats.passRun;
 

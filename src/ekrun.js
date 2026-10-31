@@ -193,6 +193,9 @@
     var t1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     this.lastMoveMs = Math.round(t1 - t0);
     this.turns += 1;
+    // 原版只会回 None；出现 undefined 说明某条分支 return 漏了值，
+    // 这种 undefined 会一路写进 history.move_history 并把重复出招检测搞崩。
+    if (move === undefined) this.undefMoves = (this.undefMoves || 0) + 1;
 
     if (move && move.source && move.dest) {
       return [[move.source.tile_index, move.dest.tile_index, !!move.move_half]];
@@ -204,6 +207,7 @@
     return {
       started: this.started,
       errors: this.errors,
+      undefMoves: this.undefMoves || 0,
       lastError: this.lastError,
       lastFrame: firstEkFrame(this.lastStack),
       ms: this.lastMoveMs,
