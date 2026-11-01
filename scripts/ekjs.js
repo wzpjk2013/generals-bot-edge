@@ -237,6 +237,13 @@ function playGameEk(seed, opponent, ekSide, opts) {
   const vis0 = A.updateFog(fogs[ekSide], board, ekSide);
   const st0 = serialize(board, ekSide, fogs[ekSide], vis0);
   ek.start(startDataFor(board, ekSide), updatePacket(board, 1, st0));
+  // 录制：与 ekrun 的 __GB_DUMP() 同构（startData + 逐回合原始包），用于验证
+  // scripts/ekreplay.js 能 1:1 重放同一局。opts.record 是传入的容器对象。
+  if (opts.record) {
+    opts.record.startData = ek.startData;
+    opts.record.packets = [updatePacket(board, 1, st0)];
+    opts.record.moves = [];
+  }
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     turns = turn + 1;
@@ -245,7 +252,10 @@ function playGameEk(seed, opponent, ekSide, opts) {
       const vis = A.updateFog(fogs[p], board, p);
       if (p === ekSide) {
         const st = serialize(board, p, fogs[p], vis);
-        const mv = ek.turn(updatePacket(board, turn + 1, st));
+        const pk = updatePacket(board, turn + 1, st);
+        if (opts.record) opts.record.packets.push(pk);
+        const mv = ek.turn(pk);
+        if (opts.record) opts.record.moves.push(mv ? mv.slice() : null);
         // 探针钩子：出招前的板上真实状态 + 引擎内部计划，用于定位非法招来源
         if (opts.onTurn) opts.onTurn(turn, board, p, mv, ek);
         if (mv) {

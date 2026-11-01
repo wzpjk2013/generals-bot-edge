@@ -128,7 +128,54 @@
     this.lastStack = '';
     this.lastMoveMs = 0;
     this.turns = 0;
+    // 按「错误种类 + 文件:行」分组计数：真机上一次崩溃和一次的根因往往不是同一处，
+    // 只留最后一条会把先发生的那条冲掉。
+    this.errKinds = {};
+    this.errFirst = null;
+    // 真机上的崩溃本地复现不出来时，唯一可靠的办法是把「喂给引擎的全部原始包」录下来，
+    // 拿回 Node 里 1:1 重放。这里只存原始 packet，不做任何加工，重放脚本 scripts/ekreplay.js。
+    this.startData = null;
+    this.packets = [];
   }
+
+  /*
+   * 记一次异常，并把「第一次出现的那条」固化下来。
+   *
+   * 真机面板只有一行、会被 CSS 截断，所以把 file:line 提到消息最前面，用户截图就能
+   * 直接定位；完整栈放进 window.__GB_ERR 供 F12 里 copy(JSON.stringify(__GB_ERR)) 取走。
+   */
+  EkEngine.prototype.noteError = function (kind, e) {
+    var msg = (e && e.message) || String(e);
+    var stack = (e && e.stack) || '';
+    var frame = firstEkFrame(stack);
+    var key = kind + ' @ ' + (frame || '?') + ' :: ' + msg;
+    this.errKinds[key] = (this.errKinds[key] || 0) + 1;
+    if (!this.errFirst) {
+      this.errFirst = {
+        kind: kind,
+        turn: this.map ? this.map.turn : -1,
+        msg: msg,
+        frame: frame,
+        stack: stack
+      };
+    }
+    root.__GB_ERR = {
+      kind: kind,
+      turn: this.map ? this.map.turn : -1,
+      msg: msg,
+      frame: frame,
+      stack: stack,
+      kinds: this.errKinds,
+      count: this.errors
+    };
+    // 每种「种类+位置」只在第一次打印整条栈，避免每回合刷屏把控制台淹掉。
+    if (this.errKinds[key] === 1 && root.console && root.console.error) {
+      root.console.error(
+        '[GBAuto] ek 引擎异常（' + kind + '，T' + (this.map ? this.map.turn : -1) + '，' + (frame || '无栈') + '）',
+        e
+      );
+    }
+  };
 
   EkEngine.prototype.reset = function () {
     this.map = null;
@@ -152,6 +199,11 @@
       return [];
     }
     var packet = packetFor(S);
+    // 录制：真机崩溃拿不到栈时，用户可以 copy(__GB_DUMP()) 把整局原始包交给本地重放。
+    if (!this.startData) {
+      try { this.startData = startDataFor(S); } catch (e0) { this.startData = null; }
+    }
+    if (this.packets.length < 600) this.packets.push(packet);
     try {
       if (!this.started) {
         var startData = startDataFor(S);
@@ -171,6 +223,8 @@
       // 并把整局引擎重建 —— 带着错位的内部状态继续走只会越走越歪。
       this.errors += 1;
       this.lastError = 'map: ' + ((e && e.message) || e);
+      this.lastStack = (e && e.stack) || '';
+      this.noteError('map', e);
       this.reset();
       return [];
     }
@@ -184,10 +238,7 @@
       this.errors += 1;
       this.lastError = 'move: ' + ((e && e.message) || e);
       this.lastStack = (e && e.stack) || '';
-      // 只在第一次打印整条栈：真机面板放不下栈，控制台里留一份给用户复制。
-      if (this.errors === 1 && root.console && root.console.error) {
-        root.console.error('[GBAuto] ek 引擎异常（T' + this.map.turn + '）', e);
-      }
+      this.noteError('move', e);
       move = null;
     }
     var t1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
@@ -210,6 +261,8 @@
       undefMoves: this.undefMoves || 0,
       lastError: this.lastError,
       lastFrame: firstEkFrame(this.lastStack),
+      errKinds: this.errKinds,
+      errFirst: this.errFirst,
       ms: this.lastMoveMs,
       turns: this.turns,
       missing: (root.__EK && root.__EK.Bot && root.__EK.Bot.missingReport) ? root.__EK.Bot.missingReport() : {}
@@ -218,4 +271,16 @@
 
   GB.EkEngine = EkEngine;
   GB.ekbot = new EkEngine();
+  /*
+   * 真机调试出口：在 F12 里 `copy(__GB_DUMP())` 就能把这局「开局参数 + 全部原始包」
+   * 复制走，落到文件后用 `node scripts/ekreplay.js <文件>` 1:1 重放，栈和状态都在本地。
+   */
+  root.__GB_DUMP = function () {
+    var e = root.__GB_ERR || null;
+    return JSON.stringify({
+      startData: GB.ekbot.startData,
+      packets: GB.ekbot.packets,
+      err: e
+    });
+  };
 })();

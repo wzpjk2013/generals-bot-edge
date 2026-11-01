@@ -125,6 +125,39 @@ function islandCanon(island) {
   return best;
 }
 const origIfa = EK.ArmyFlowExpander.prototype._is_flow_allowed;
+// canon 空间 dump flow dict（带符号端口），用于和 oracle 的 flow 直接比
+const FLOW_OUT = process.env.GB_FLOW_OUT || null;
+const flowLog = [];
+const origCfd3 = EK.flow.NetworkXFlowDirectionFinder.prototype.compute_flow_dict;
+EK.flow.NetworkXFlowDirectionFinder.prototype.compute_flow_dict = function (islands, graphData, method) {
+  const res = origCfd3.apply(this, arguments);
+  if (FLOW_OUT) {
+    try {
+      const tileOfUid = new Map();
+      for (const isl of islands.all_tile_islands.items()) {
+        let m = Infinity;
+        for (const t of isl.tile_set.raw || isl.tile_set) if (t.tile_index < m) m = t.tile_index;
+        if (m !== Infinity) tileOfUid.set(isl.unique_id, m);
+      }
+      const fakeSet = graphData.fake_nodes instanceof Set ? graphData.fake_nodes : new Set();
+      const cn = function (id) {
+        const v = Number(id);
+        if (fakeSet.has(v) || fakeSet.has(-v)) return 'FAKE';
+        const c = tileOfUid.get(Math.abs(v));
+        const base = c === undefined ? '?' + Math.abs(v) : c;
+        return (v < 0 ? '-' : '') + base;
+      };
+      const edges = [];
+      res.forEach(function (targets, src) {
+        targets.forEach(function (val, dst) { if (val) edges.push(cn(src) + '>' + cn(dst) + ':' + val); });
+      });
+      flowLog.push({ turn: this.map.turn, edges: edges.sort() });
+    } catch (e) {
+      flowLog.push({ turn: this.map.turn, error: String(e && e.message) });
+    }
+  }
+  return res;
+};
 // dump 实际喂给求解器的两张图，判定「图不同」还是「同图多解」
 const GRAPH_OUT = process.env.GB_GRAPH_OUT || null;
 const graphLog = [];
@@ -152,6 +185,106 @@ EK.flow.NetworkXFlowDirectionFinder.prototype.compute_flow_dict = function (isla
   }
   return origCfd.call(this, islands, graphData, method);
 };
+
+// graft：用 oracle 的 flowDict 顶替 JS 求解结果，用来把「求解器选解差异」与
+// 「JS 逻辑 bug」分开。只在本脚本内生效，仓库代码零改动。
+const GRAFT_PATH = process.env.GB_GRAFT_FLOW || null;
+let graftByTurn = null;
+if (GRAFT_PATH) {
+  const raw = JSON.parse(fs.readFileSync(GRAFT_PATH, 'utf8'));
+  graftByTurn = new Map();
+  for (const e of raw) {
+    const k = String(e.turn);
+    if (!graftByTurn.has(k)) graftByTurn.set(k, new Map());
+    graftByTurn.get(k).set(e.which, e);
+  }
+}
+function isWithNeut(graphData) {
+  // python：with_neut 的 fakeNode→neutSink 边 weight=10，no_neut 为 0
+  const g = graphData.graph;
+  const fakes = graphData.fake_nodes;
+  const isFake = function (n) {
+    if (fakes && typeof fakes.has === 'function') return fakes.has(n);
+    return Math.abs(n) >= 1000000;
+  };
+  const edges = g.edges(true);
+  for (const e of edges) {
+    const at = e[2] || {};
+    if (isFake(e[0]) && at.weight === 10) return true;
+  }
+  return false;
+}
+function graftFlowDict(finder, islands, graphData) {
+  const turn = String(finder.map.turn);
+  const perTurn = graftByTurn.get(turn);
+  if (!perTurn) return null;
+  const which = isWithNeut(graphData) ? 'with_neut' : 'no_neut';
+  const entry = perTurn.get(which);
+  if (!entry) return null;
+  const g = graphData.graph;
+  const nodeIds = g.nodes();
+  const nodeSet = new Set(nodeIds.map(Number));
+  let jsFake = null;
+  const fakes = graphData.fake_nodes;
+  if (fakes && typeof fakes.forEach === 'function') {
+    fakes.forEach(function (f) { if (jsFake === null) jsFake = f; });
+  }
+  // py 与 js 的 island.unique_id 分配不同（差一位），只能通过 canon=tile_set 最小 tile_index 对齐
+  const pyCanon = entry.canon || {};
+  const jsUidByTile = new Map();
+  for (const isl of islands.all_tile_islands.items()) {
+    let m = Infinity;
+    for (const t of isl.tile_set.raw || isl.tile_set) if (t.tile_index < m) m = t.tile_index;
+    if (m !== Infinity && !jsUidByTile.has(m)) jsUidByTile.set(m, isl.unique_id);
+  }
+  const remap = function (n) {
+    const v = Number(n);
+    if (nodeSet.has(v)) return v;
+    const canon = pyCanon[String(Math.abs(v))];
+    if (canon !== undefined && jsUidByTile.has(canon)) {
+      const uid = jsUidByTile.get(canon);
+      return v < 0 ? -uid : uid;
+    }
+    const a = Math.abs(v);
+    if (nodeSet.has(a)) return v < 0 ? -a : a;
+    return jsFake === null ? v : jsFake;
+  };
+  const flowBySource = new Map();
+  for (const e of entry.edges) {
+    const u = remap(e[0]);
+    const v = remap(e[1]);
+    if (!flowBySource.has(u)) flowBySource.set(u, new Map());
+    flowBySource.get(u).set(v, (flowBySource.get(u).get(v) || 0) + e[2]);
+  }
+  const flowDict = new Map();
+  for (const nid of nodeIds) {
+    const targets = new Map();
+    const outEdges = g.out_edges_of ? g.out_edges_of(nid) : (g._adj instanceof Map && g._adj.get(nid) ? Array.from(g._adj.get(nid).keys()) : []);
+    const srcMap = flowBySource.get(Number(nid));
+    for (const t of outEdges) {
+      let val = 0;
+      if (srcMap) {
+        if (srcMap.has(t)) val = srcMap.get(t);
+        else if (srcMap.has(Number(t))) val = srcMap.get(Number(t));
+      }
+      targets.set(t, val);
+    }
+    flowDict.set(nid, targets);
+  }
+  return flowDict;
+}
+const origCfd2 = EK.flow.NetworkXFlowDirectionFinder.prototype.compute_flow_dict;
+let graftHits = 0;
+let graftMisses = 0;
+EK.flow.NetworkXFlowDirectionFinder.prototype.compute_flow_dict = function (islands, graphData, method) {
+  if (graftByTurn) {
+    const gd = graftFlowDict(this, islands, graphData);
+    if (gd) { graftHits++; return gd; }
+    graftMisses++;
+  }
+  return origCfd2.call(this, islands, graphData, method);
+};
+
 const IFA_DBG = process.env.GB_IFA_DBG || null;
 EK.ArmyFlowExpander.prototype._is_flow_allowed = function (fromIsland, toIsland, armyAmount) {
   const res = origIfa.apply(this, arguments);
@@ -310,5 +443,12 @@ if (IFA_OUT) {
 if (GRAPH_OUT) {
   fs.writeFileSync(GRAPH_OUT, JSON.stringify(graphLog));
   console.log('wrote ' + graphLog.length + ' nx flow graphs to ' + GRAPH_OUT);
+}
+if (graftByTurn) {
+  console.log('graft hits=' + graftHits + ' misses=' + graftMisses);
+}
+if (FLOW_OUT) {
+  fs.writeFileSync(FLOW_OUT, JSON.stringify(flowLog));
+  console.log('wrote ' + flowLog.length + ' js flow dicts to ' + FLOW_OUT);
 }
 process.exit(diverged === 0 ? 0 : 1);

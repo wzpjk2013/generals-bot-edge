@@ -175,9 +175,23 @@
     return out;
   }
 
+  /*
+   * 摊平成 tile 数组。除了 Set / 数组，还要挡住两类会被上层误传进来的东西：
+   * Map（`Array.from` 会给 [key, value] 数组）和含空位的数组（洞会变 undefined）。
+   * 真机上把 Map 当 tile 集合传进来时，报出来是 `Cannot read properties of
+   * undefined (reading 'tile_index')`，位置在这里而不是真正传错的那一层，所以在这里
+   * 就把不合法的元素滤掉，别让它继续往下游扩散。
+   */
   function toTiles(coll) {
-    if (typeof coll.toTiles === 'function') return coll.toTiles();
-    return Array.from(coll);
+    if (typeof coll.toTiles === 'function') coll = coll.toTiles();
+    else if (coll instanceof Map) coll = Array.from(coll.keys());
+    else coll = Array.from(coll);
+    var out = [];
+    for (var i = 0; i < coll.length; i++) {
+      var t = coll[i];
+      if (t && typeof t.tile_index === 'number') out.push(t);
+    }
+    return out;
   }
 
   /*

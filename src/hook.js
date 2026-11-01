@@ -137,9 +137,10 @@
     // 这一步一旦出错就改让自制引擎出招，至少还在下棋，同时把原因写进面板。
     if (ek && ek.stats && ek.stats().errors > ekErrBefore) {
       var ekst = ek.stats();
-      stats.ekErr = (ekst.lastError || '未知错误') +
-        (ekst.lastFrame ? ' @ ' + ekst.lastFrame : '') +
-        '（第 ' + ekst.errors + ' 次）';
+      // 状态行会被 CSS 截断，所以「文件:行」放最前面——截图就能直接定位到哪一行。
+      var loc = ekst.lastFrame ? ekst.lastFrame.replace(/^eklipz\//, '').replace(/\.js/, '') : '';
+      var msg = String(ekst.lastError || '未知错误').replace(/^(move|map):\s*/, '');
+      stats.ekErr = (loc ? loc + ' ' : '') + msg + '（第 ' + ekst.errors + ' 次）';
       try {
         moves = GB.bot.plan(S, settings);
         if (moves && moves.length) stats.ekFallback = (stats.ekFallback || 0) + 1;
@@ -678,6 +679,17 @@
           (ekst.lastError ? '（' + ekst.lastError + (ekst.lastFrame ? ' @ ' + ekst.lastFrame : '') + '）' : '');
         if (stats.ekFallback) tip += ' / 回落自制引擎 ' + stats.ekFallback + ' 次';
         if (ekst.undefMoves) tip += ' / ek 空值招 ' + ekst.undefMoves + ' 次';
+        // 同一条错会连着每回合复现，按「种类+位置」分组才能看出到底有几处不同的根因。
+        if (ekst.errKinds) {
+          var keys = Object.keys(ekst.errKinds);
+          if (keys.length > 1) {
+            tip += ' / 报错种类 ' + keys.length + '：' +
+              keys.slice(0, 3).map(function (k) { return ekst.errKinds[k] + 'x ' + k; }).join('；');
+          }
+          tip += ' / 完整栈在 F12 里 copy(JSON.stringify(__GB_ERR))';
+          // 更狠的一招：把整局原始包带走，本地 1:1 重放就能复现线上崩溃。
+          tip += '；整局原始包 copy(__GB_DUMP()) 后存文件，跑 node scripts/ekreplay.js 重放';
+        }
       }
       if (stats.passRun) tip += ' / 连续空过 ' + stats.passRun;
 
