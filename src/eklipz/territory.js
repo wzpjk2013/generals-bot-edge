@@ -43,6 +43,42 @@
     return teamId(map, p) === team;
   }
 
+  /*
+   * Python 的 list[-1] 取末元素。原版 Territory.py:28 把 territoryDistances 建成
+   * `[MapMatrix(map, 1000) for p in map.players]`，而调用点会写
+   * `bot.territories.territoryDistances[bot.targetPlayer]`（BotExpansionOps.py:2088 等），
+   * targetPlayer 在「还不知道打谁」时是 -1 ⇒ py 取末位玩家的矩阵，JS 直接下标得到
+   * undefined，下一句 `.raw[...]` 就炸 `Cannot read properties of undefined (reading 'raw')`。
+   * 只拦负整数下标，其余（length / 方法 / 正下标）原样走。
+   */
+  function pyArray(arr) {
+    if (typeof Proxy !== 'function') return arr;
+    return new Proxy(arr, {
+      get: function (target, prop, recv) {
+        if (typeof prop === 'string' && prop.length > 1 && prop.charAt(0) === '-') {
+          var n = Number(prop);
+          if (!isNaN(n) && n < 0) {
+            var k = target.length + n;
+            return target[k >= 0 ? k : target.length - 1];
+          }
+        }
+        return Reflect.get(target, prop, recv);
+      },
+      set: function (target, prop, value) {
+        if (typeof prop === 'string' && prop.length > 1 && prop.charAt(0) === '-') {
+          var n = Number(prop);
+          if (!isNaN(n) && n < 0) {
+            var k = target.length + n;
+            target[k >= 0 ? k : target.length - 1] = value;
+            return true;
+          }
+        }
+        target[prop] = value;
+        return true;
+      }
+    });
+  }
+
   function TerritoryClassifier(map) {
     this.map = map;
     this.lastCalculatedTurn = -1;
@@ -64,8 +100,10 @@
 
     this.territoryDistances = [];
     for (var p = 0; p < map.players.length; p++) this.territoryDistances.push(MM(map, 1000));
+    this.territoryDistances = pyArray(this.territoryDistances);
     this.territoryTeamDistances = [];
     for (var ti = 0; ti < this.team_indexes.length; ti++) this.territoryTeamDistances.push(MM(map, 1000));
+    this.territoryTeamDistances = pyArray(this.territoryTeamDistances);
 
     var self = this;
     map.pathable_tiles.forEach(function (tile) {

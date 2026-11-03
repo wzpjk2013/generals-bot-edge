@@ -475,6 +475,11 @@
     this.pathed_fog_emergence_tiles = new Set();
     this.seen_player_lookup = [];
     for (i = 0; i < this.map.players.length; i++) this.seen_player_lookup.push(false);
+    // 4026/4027 会写 connectedByPlayer[player]（player 可为 -1，py 取末位），
+    // 477/615/3617 写 seen_player_lookup[player]，同样按 py list 语义套负下标代理。
+    this.connectedByPlayer = pyArray(this.connectedByPlayer);
+    this.coreConnectedByPlayer = pyArray(this.coreConnectedByPlayer);
+    this.seen_player_lookup = pyArray(this.seen_player_lookup);
 
     this.is_long_spawns = this.map.players.length === 2;
     this.min_spawn_distance = 9;

@@ -45,6 +45,41 @@
     missingCounts[name] = (missingCounts[name] || 0) + 1;
   }
 
+  /*
+   * Python 的 list[-1] 取末元素。原版这些按玩家号建的数组一律是 py list
+   * （如 bot_ek0x45.py 里 self.alt_en_gen_positions = [[] for p in map.players]），
+   * 而 bot.targetPlayer 在还没选目标时是 -1：py 取末位玩家的那格，JS 直接下标得
+   * undefined，下一步读 .raw/.slice 就抛 Cannot read properties of undefined。
+   * 只拦负整数下标，其余（length / 方法 / 正下标）原样走。
+   */
+  function pyArray(arr) {
+    if (typeof Proxy !== 'function') return arr;
+    return new Proxy(arr, {
+      get: function (target, prop, recv) {
+        if (typeof prop === 'string' && prop.length > 1 && prop.charAt(0) === '-') {
+          var n = Number(prop);
+          if (!isNaN(n) && n < 0) {
+            var k = target.length + n;
+            return target[k >= 0 ? k : target.length - 1];
+          }
+        }
+        return Reflect.get(target, prop, recv);
+      },
+      set: function (target, prop, value) {
+        if (typeof prop === 'string' && prop.length > 1 && prop.charAt(0) === '-') {
+          var n = Number(prop);
+          if (!isNaN(n) && n < 0) {
+            var k = target.length + n;
+            target[k >= 0 ? k : target.length - 1] = value;
+            return true;
+          }
+        }
+        target[prop] = value;
+        return true;
+      }
+    });
+  }
+
   // ---- 本地支撑类 ---------------------------------------------------------
 
   // 原版 PerformanceTimer 会记时间戳、写文件。这里只保留调用点需要的空实现。
@@ -532,6 +567,10 @@
       this._alt_en_position_distances_placeholder = null;
       this._alt_en_gen_position_distances.push(null);
     }
+    // bot.alt_en_gen_positions[-1] / bot._alt_en_gen_position_distances[-1] 在
+    // expansionops.js:2148/2150 被直接下标（py 取末位玩家），这里套上负下标代理。
+    this.alt_en_gen_positions = pyArray(this.alt_en_gen_positions);
+    this._alt_en_gen_position_distances = pyArray(this._alt_en_gen_position_distances);
 
     // 原版是 MapBase.get_teams_array(map)（bot_ek0x45.py:2033），不是 map.teams —— map.js 没这个字段
     this.teams = EK.Map.get_teams_array(map);
@@ -821,6 +860,7 @@
 
     this._alt_en_gen_position_distances = [];
     for (var p1 = 0; p1 < map.players.length; p1++) this._alt_en_gen_position_distances.push(null);
+    this._alt_en_gen_position_distances = pyArray(this._alt_en_gen_position_distances);
 
     this._afk_players = null;
     this._is_ffa_situation = null;
