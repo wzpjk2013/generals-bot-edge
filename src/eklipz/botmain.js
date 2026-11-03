@@ -838,13 +838,58 @@
     map.last_player_index_submitted_move = null;
     if (move) {
       if (move.source.player() !== this.general.player()) {
-        throw new Error('find_move: move.source.player() ' + move.source.player()
-          + ' != general.player ' + this.general.player());
+        // py 那边这里是 assert，被 BotHost.make_move(rethrow=False) 吞掉 → 这一回合就是 pass。
+        // 所以这里只记录 + 投降为 null，不补救性地另挑一招（那才是行为偏离）。
+        this._log_invalid_move(move);
+        move = null;
+      } else {
+        map.last_player_index_submitted_move = [move.source, move.dest, !!move.move_half];
       }
-      map.last_player_index_submitted_move = [move.source, move.dest, !!move.move_half];
     }
 
     return move;
+  };
+
+  /* 非法招（source 不是我方格）的来源追踪。只在真要 log 的那一刻调用，正常路径零开销。
+   * 光把断言换成 pass 只是盖住症状，得先看清是哪条分支产的招：
+   * 如果 gatherRoot / expansionRoot 落在敌方格上，那是某个 plan 用了 targetPlayer 的视角，属实质 bug。 */
+  P._log_invalid_move = function (move) {
+    var map = this._map;
+    var src = move && move.source ? move.source : null;
+    var dst = move && move.dest ? move.dest : null;
+    var gen = this.general || null;
+    var gcp = this.target_player_gather_path || null;
+    var exp = this.expansion_plan || null;
+    var sel = exp && exp.selected_option ? exp.selected_option : null;
+    var myGenPlayer = gen && gen.player ? gen.player() : null;
+
+    var gathRoot = 'null';
+    if (this.gatherNodes && this.gatherNodes.length) {
+      var g0 = this.gatherNodes[0];
+      gathRoot = this.gatherNodes.length + '@' + (g0 && g0.tile ? (g0.tile.x + ',' + g0.tile.y) : '?');
+    }
+    var expRoot = sel && sel.start && sel.start.tile
+      ? (sel.start.tile.x + ',' + sel.start.tile.y + ' p' + sel.start.tile.player())
+      : 'null';
+
+    var line = '[GBAuto] 非法招来源'
+      + ' turn=' + (map ? map.turn : null)
+      + ' 我方=' + myGenPlayer
+      + ' source=' + (src ? ('(' + src.x + ',' + src.y + ' p' + src.player() + ')') : 'null')
+      + ' dest=' + (dst ? ('(' + dst.x + ',' + dst.y + ' p' + dst.player() + ')') : 'null')
+      + ' half=' + !!(move && move.move_half)
+      + ' targetPlayer=' + this.targetPlayer
+      + ' phase=' + (this.phase === undefined ? 'null' : this.phase)
+      + ' gatherRoot=' + gathRoot
+      + ' expansionRoot=' + expRoot
+      + ' attackPath=' + (gcp ? ('len=' + gcp.length + ' start=' + (gcp.start && gcp.start.tile
+        ? (gcp.start.tile.x + ',' + gcp.start.tile.y + ' p' + gcp.start.tile.player()) : 'null')
+        + ' tiles=' + (gcp.tileSet ? gcp.tileSet.size : 'null')) : 'null')
+      + ' genArmy=' + (gen && gen.army !== undefined ? gen.army : 'null')
+      + ' curPath=' + (this.curPath ? 'set' : 'null');
+
+    if (this.viewInfo && this.viewInfo.add_info_line) this.viewInfo.add_info_line(line);
+    if (root.console && root.console.warn) root.console.warn(line);
   };
 
   // ---- bot_ek0x45.py:573 init_turn ---------------------------------------
@@ -854,6 +899,10 @@
 
     this.quick_kill_city_plan_option = null;
     this.contest_city_plan_option = null;
+
+    // 玩家表长度可能比 map.players 短一截（FFA 掉线/重连的同步窗口），
+    // 缺表就地补空表，否则下游按合法下标取到的还是 undefined。
+    if (this.armyTracker && this.armyTracker._sync_player_tables) this.armyTracker._sync_player_tables();
 
     this.was_defending_economy = this.defend_economy;
     this.defend_economy = false;

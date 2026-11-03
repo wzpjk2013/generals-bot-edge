@@ -98,11 +98,20 @@
     var map = _map(bot);
     return map.generals[playerIndex];
   }
+  /* py 里这些表都是按 map.players 建的 list，拿 -1 当下标会落到末位玩家；
+   * 目标未锁定时上游的 player 就是 -1，裸下标会在这里炸出 undefined.raw。 */
+  function _pyAt(arr, idx) {
+    if (!arr || arr.length === 0) return undefined;
+    if (idx >= 0 && idx < arr.length) return arr[idx];
+    return arr[arr.length - 1];
+  }
   function _validGenPos(bot, player, tile) {
-    return !!bot.armyTracker.valid_general_positions_by_player[player].raw[tile.tile_index];
+    var tbl = _pyAt(bot.armyTracker.valid_general_positions_by_player, player);
+    return !!(tbl && tbl.raw[tile.tile_index]);
   }
   function _emergenceAt(bot, player, tile) {
-    return bot.armyTracker.emergenceLocationMap[player].raw[tile.tile_index];
+    var tbl = _pyAt(bot.armyTracker.emergenceLocationMap, player);
+    return tbl ? tbl.raw[tile.tile_index] : 0;
   }
   function _genDist(bot, tile) {
     return EK.BotPathingUtils.distance_from_general(bot, tile);

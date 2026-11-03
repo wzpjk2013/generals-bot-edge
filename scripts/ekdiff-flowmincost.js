@@ -493,8 +493,7 @@ function main() {
         report('结构指标不一致', row.turn, bi, structBad.join(' | '));
       }
 
-      var arcCmp = compareArcs(g, jsGraph);
-      if (arcCmp.diffs.length) {
+      var arcCmp = compareArcs(g, jsGraph);      if (arcCmp.diffs.length) {
         arcInvalidBuilds++;
         report('弧不一致', row.turn, bi,
           'py=' + arcCmp.pyCount + ' js=' + arcCmp.jsCount + ' 差异弧 ' + arcCmp.diffs.length);
@@ -502,6 +501,59 @@ function main() {
           process.stdout.write('      ' + d.key + ' py=' + JSON.stringify(d.py) + ' js=' + JSON.stringify(d.js) + '\n');
         });
       }
+
+      // 弧的多重集相同 ≠ 插入序相同：忠实求解器的平局解只由插入序与节点编号决定，
+      // 所以这里单独比一次「按位置」的弧序列，差异要能说清是编号还是顺序。
+      if (process.env.GB_ARC_ORDER) {
+        var pyIds = g.nodeIds;
+        var jsIdxToNode = jsGraph.idx_to_node;
+        var maxA = Math.min(g.startNodes.length, jsGraph.start_nodes.length);
+        var pyFakeSet = new Set(g.fakeNodes || []);
+        var normPy = function (id) { return pyFakeSet.has(id) ? 'F' : id; };
+        var normJs = function (id) { return jsGraph.fake_nodes.has(id) ? 'F' : id; };
+        var posBad = -1;
+        for (var pa = 0; pa < maxA; pa++) {
+          var pf = normPy(pyIds[g.startNodes[pa]]);
+          var pt = normPy(pyIds[g.endNodes[pa]]);
+          var jf2 = normJs(jsIdxToNode.get(jsGraph.start_nodes[pa]));
+          var jt2 = normJs(jsIdxToNode.get(jsGraph.end_nodes[pa]));
+          if (pf !== jf2 || pt !== jt2) { posBad = pa; break; }
+        }
+        var nodeBad = -1;
+        for (var nb = 0; nb < Math.min(pyIds.length, jsGraph.node_ids.length); nb++) {
+          if (normPy(pyIds[nb]) !== normJs(jsGraph.node_ids[nb])) { nodeBad = nb; break; }
+        }
+        report('顺序检查', row.turn, bi,
+          '弧位置首个差异=' + posBad + ' 节点位置首个差异=' + nodeBad +
+          ' pyPfx=' + JSON.stringify(pyIds.slice(0, 4)) + ' jsPfx=' + JSON.stringify(jsGraph.node_ids.slice(0, 4)));
+        if (posBad >= 0) {
+          var lo = Math.max(0, posBad - 4);
+          for (var dq = lo; dq < Math.min(posBad + 6, maxA); dq++) {
+            process.stdout.write('      #' + dq +
+              ' py ' + pyIds[g.startNodes[dq]] + '>' + pyIds[g.endNodes[dq]] +
+              ' cap=' + g.capacities[dq] + ' cost=' + g.unitCosts[dq] +
+              ' | js ' + jsIdxToNode.get(jsGraph.start_nodes[dq]) + '>' + jsIdxToNode.get(jsGraph.end_nodes[dq]) +
+              ' cap=' + jsGraph.capacities[dq] + ' cost=' + jsGraph.unit_costs[dq] + '\n');
+          }
+          // 首个差异弧的源岛：把两边的 border_islands 顺序与排序键打出来
+          var srcId = pyIds[g.startNodes[posBad]];
+          var srcIslandId = srcId < 0 ? -srcId : srcId;
+          var srcIsland = islands.tile_islands_by_unique_id[srcIslandId] ||
+            (islands.tile_islands_by_unique_id.get ? islands.tile_islands_by_unique_id.get(srcIslandId) : null);
+          if (srcIsland) {
+            var bl = srcIsland.border_islands.items ? srcIsland.border_islands.items() : srcIsland.border_islands;
+            var desc = [];
+            for (var bi2 = 0; bi2 < bl.length; bi2++) {
+              desc.push(bl[bi2].unique_id + '@' + bl[bi2].tiles_by_army[0].tile_index);
+            }
+            process.stdout.write('      js border_islands(' + srcIslandId + ') = ' + desc.join(' ') + '\n');
+            process.stdout.write('      py 顺序片段 = ' +
+              pyIds[g.startNodes[posBad]] + '>' + pyIds[g.endNodes[posBad]] + ', ' +
+              pyIds[g.startNodes[posBad + 1]] + '>' + pyIds[g.endNodes[posBad + 1]] + '\n');
+          }
+        }
+      }
+
 
       var supDiffs = compareSupplies(g, jsGraph);
       if (supDiffs.length) {

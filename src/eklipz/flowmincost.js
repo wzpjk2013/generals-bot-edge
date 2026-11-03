@@ -165,19 +165,34 @@
   };
 
   MinCostFlow.prototype._indexNodes = function () {
+    // 节点下标 == ortools 的节点编号，而 python 侧是 node_list = sorted(all_node_ids)
+    // （OrToolsFlowDirectionFinder.py:1512 / 1647），所以这里必须按 id 升序排名。
+    // 用「首次出现序」会让弧表索引与 ortools 错位，逐弧对拍时看起来只差几条弧，实际是自欺。
     var idToIdx = new Map();
     var idxToId = [];
-    function intern(id) {
-      if (idToIdx.has(id)) return idToIdx.get(id);
-      idToIdx.set(id, idxToId.length);
-      idxToId.push(id);
-      return idxToId.length - 1;
+    var seen = [];
+    function collect(id) {
+      if (idToIdx.has(id)) return;
+      idToIdx.set(id, -1);
+      seen.push(id);
     }
     for (var i = 0; i < this._arcFrom.length; i++) {
-      intern(this._arcFrom[i]);
-      intern(this._arcTo[i]);
+      collect(this._arcFrom[i]);
+      collect(this._arcTo[i]);
     }
-    this._supplyById.forEach(function (_v, id) { intern(id); });
+    this._supplyById.forEach(function (_v, id) { collect(id); });
+    seen.sort(function (a, b) {
+      var na = Number(a);
+      var nb = Number(b);
+      if (!isNaN(na) && !isNaN(nb)) return na - nb;
+      var sa = String(a);
+      var sb = String(b);
+      return sa < sb ? -1 : (sa > sb ? 1 : 0);
+    });
+    for (var k = 0; k < seen.length; k++) {
+      idToIdx.set(seen[k], k);
+      idxToId.push(seen[k]);
+    }
     return { idToIdx: idToIdx, idxToId: idxToId };
   };
 
@@ -376,6 +391,423 @@
       optimalCost += used * this._arcCost[ai];
     }
     return { flows: flows, optimalCost: optimalCost };
+  };
+
+  // ---------------------------------------------------------------- OrToolsMinCostFlow
+  //
+  // 逐弧忠实复刻 ortools 9.15 `SimpleMinCostFlow`（cost-scaling push-relabel）。
+  // 与上面 SPFA 版的差别不只是成本：**每条弧上的流量**也一致。决策层（expandhooks → botmain）
+  // 吃的是 flow dict，等成本多解选哪个解会直接改变 plan，所以只有逐弧一致才算移植到味。
+  //
+  // 对照的 C++ 源：`_research/ortools-src/min_cost_flow.cc` / `graph.h`，几处必须照抄、不许“顺手简化”：
+  //   - 增广图：全部原弧（插入序）→ for node 升序 push source→node / node→sink（cap=|supply|, cost 0）
+  //   - Graph::Build：正向弧按 tail 稳定计数排序，perm[old]=new；反向弧按正向 index 升序成块
+  //   - 每节点弧迭代序 = 反向弧块 + 正向出弧块；用扁平 seq + 位置游标（== 序列长即 kNilArc）等价复刻
+  //   - cost-scaling：factor = 增广节点数+1，epsilon 起点 max|cost*factor|，每轮 max(trunc(eps/5),1)
+  //   - 每轮先 Saturate（节点升序、从游标起、推满、完事置 kNilArc），活跃栈是 std::stack = LIFO
+  //   - Relabel 里 min_non_admissible_potential 取 **max**，游标回退 previous_min <= new_pot ? first_arc : 序列头
+  //   - use_price_update_ 默认 false（true 时 UpdatePrices 未实现，直接抛错而不是静默算错）
+  var ORTOOLS_MCF_OPTIMAL = 0;
+  var ORTOOLS_MCF_INFEASIBLE = 2;
+  var ORTOOLS_MCF_UNBALANCED = 3;
+  var ORTOOLS_MCF_BAD_COST_RANGE = 5;
+  var ORTOOLS_MCF_NOT_SOLVED = 6;
+
+  /**
+   * Dinic 最大流，只用来判「供给能不能全送到」并拿 maximum_flow_。
+   * 值本身与算法无关（ortools 也只用这个值给源汇设 supply），所以不必和它同法。
+   */
+  function ortoolsMaxFlowValue(nodeCount, tails, heads, caps, source, sink) {
+    if (nodeCount <= 0 || source === sink) return 0;
+    var m = tails.length;
+    var adjHead = [];
+    var adjNext = [];
+    var adjCap = [];
+    var adj = new Int32Array(nodeCount);
+    for (var z = 0; z < nodeCount; z++) adj[z] = -1;
+    for (var a = 0; a < m; a++) {
+      var e = adjHead.length;
+      adjHead.push(heads[a]); adjCap.push(caps[a]); adjNext.push(adj[tails[a]]); adj[tails[a]] = e;
+      adjHead.push(tails[a]); adjCap.push(0); adjNext.push(adj[heads[a]]); adj[heads[a]] = e + 1;
+    }
+    var level = new Int32Array(nodeCount);
+    var iter = new Int32Array(nodeCount);
+    var queue = new Int32Array(nodeCount + 1);
+
+    function bfs() {
+      for (var i = 0; i < nodeCount; i++) level[i] = -1;
+      level[source] = 0;
+      var qh = 0, qt = 0;
+      queue[qt++] = source;
+      while (qh < qt) {
+        var u = queue[qh++];
+        for (var e2 = adj[u]; e2 !== -1; e2 = adjNext[e2]) {
+          if (adjCap[e2] > 0 && level[adjHead[e2]] < 0) {
+            level[adjHead[e2]] = level[u] + 1;
+            queue[qt++] = adjHead[e2];
+          }
+        }
+      }
+      return level[sink] >= 0;
+    }
+
+    function dfs(u, pushed) {
+      if (u === sink) return pushed;
+      while (iter[u] !== -1) {
+        var e3 = iter[u];
+        var v = adjHead[e3];
+        if (adjCap[e3] > 0 && level[v] === level[u] + 1) {
+          var d = dfs(v, pushed < adjCap[e3] ? pushed : adjCap[e3]);
+          if (d > 0) {
+            adjCap[e3] -= d;
+            adjCap[e3 ^ 1] += d;
+            return d;
+          }
+        }
+        iter[u] = adjNext[e3];
+      }
+      return 0;
+    }
+
+    var flow = 0;
+    while (bfs()) {
+      for (var i2 = 0; i2 < nodeCount; i2++) iter[i2] = adj[i2];
+      var f;
+      while ((f = dfs(source, Infinity)) > 0) flow += f;
+    }
+    return flow;
+  }
+
+  function envFlag(name) {
+    // 浏览器里没有 process，裸用会整回合抛错
+    return typeof process !== 'undefined' && process.env && !!process.env[name];
+  }
+
+  function OrToolsMinCostFlow(options) {
+    options = options || {};
+    this.usePriceUpdate = options.usePriceUpdate === true;
+    this._tail = [];
+    this._head = [];
+    this._cap = [];
+    this._cost = [];
+    this._supply = [];
+    this.flows = null;
+    this.optimalCost = 0;
+    this.status = ORTOOLS_MCF_NOT_SOLVED;
+    this.arcPermutation = null;
+  }
+
+  OrToolsMinCostFlow.OPTIMAL = ORTOOLS_MCF_OPTIMAL;
+  OrToolsMinCostFlow.INFEASIBLE = ORTOOLS_MCF_INFEASIBLE;
+  OrToolsMinCostFlow.UNBALANCED = ORTOOLS_MCF_UNBALANCED;
+  OrToolsMinCostFlow.BAD_COST_RANGE = ORTOOLS_MCF_BAD_COST_RANGE;
+  OrToolsMinCostFlow.NOT_SOLVED = ORTOOLS_MCF_NOT_SOLVED;
+
+  OrToolsMinCostFlow.prototype._resizeNodes = function (node) {
+    while (this._supply.length <= node) this._supply.push(0);
+  };
+
+  // 对应 SimpleMinCostFlow::AddArcWithCapacityAndUnitCost：ResizeNodeVectors(max(tail, head))
+  OrToolsMinCostFlow.prototype.addArcWithCapacityAndUnitCost = function (tail, head, capacity, unitCost) {
+    this._resizeNodes(tail > head ? tail : head);
+    var idx = this._tail.length;
+    this._tail.push(tail);
+    this._head.push(head);
+    this._cap.push(trunc(capacity));
+    this._cost.push(trunc(unitCost));
+    return idx;
+  };
+
+  OrToolsMinCostFlow.prototype.add_arc_with_capacity_and_unit_cost =
+    OrToolsMinCostFlow.prototype.addArcWithCapacityAndUnitCost;
+
+  OrToolsMinCostFlow.prototype.setNodeSupply = function (node, supply) {
+    this._resizeNodes(node);
+    this._supply[node] = trunc(supply);
+  };
+
+  OrToolsMinCostFlow.prototype.set_node_supply = OrToolsMinCostFlow.prototype.setNodeSupply;
+
+  OrToolsMinCostFlow.prototype.numNodes = function () { return this._supply.length; };
+  OrToolsMinCostFlow.prototype.numArcs = function () { return this._tail.length; };
+
+  /** 同 ortools：OPTIMAL 返回 {flows, optimalCost}，否则 null（原因在 this.status）。 */
+  OrToolsMinCostFlow.prototype.solve = function () {
+    var self = this;
+    this.flows = null;
+    this.optimalCost = 0;
+    this.arcPermutation = null;
+    this.status = ORTOOLS_MCF_NOT_SOLVED;
+
+    var numNodes = this._supply.length;
+    var numArcs = this._tail.length;
+    if (numNodes === 0) {
+      this.status = ORTOOLS_MCF_OPTIMAL;
+      this.flows = [];
+      return { flows: this.flows, optimalCost: 0 };
+    }
+
+    var totalSupply = 0;
+    var totalDemand = 0;
+    for (var n0 = 0; n0 < numNodes; n0++) {
+      var s0 = this._supply[n0];
+      if (s0 > 0) totalSupply += s0;
+      else if (s0 < 0) totalDemand -= s0;
+    }
+    if (totalSupply !== totalDemand) {
+      this.status = ORTOOLS_MCF_UNBALANCED; // DONT_ADJUST 时直接放弃
+      return null;
+    }
+
+    // -- 增广图
+    var source = numNodes;
+    var sink = numNodes + 1;
+    var augNodes = numNodes + 2;
+    var aTail = this._tail.slice();
+    var aHead = this._head.slice();
+    var aCap = this._cap.slice();
+    var aCost = this._cost.slice();
+    for (var n1 = 0; n1 < numNodes; n1++) {
+      var s1 = this._supply[n1];
+      if (s1 > 0) {
+        aTail.push(source); aHead.push(n1); aCap.push(s1); aCost.push(0);
+      } else if (s1 < 0) {
+        aTail.push(n1); aHead.push(sink); aCap.push(-s1); aCost.push(0);
+      }
+    }
+    var M = aTail.length;
+
+    // -- Graph::Build：按 tail 稳定计数排序，perm[old] = new
+    var bucket = new Array(augNodes + 1);
+    for (var b0 = 0; b0 <= augNodes; b0++) bucket[b0] = 0;
+    for (var b1 = 0; b1 < M; b1++) bucket[aTail[b1] + 1]++;
+    for (var b2 = 1; b2 <= augNodes; b2++) bucket[b2] += bucket[b2 - 1];
+    var cursor = bucket.slice(0, augNodes);
+    var perm = new Array(M);
+    for (var b3 = 0; b3 < M; b3++) perm[b3] = cursor[aTail[b3]]++;
+    var tail2 = new Array(M);
+    var head2 = new Array(M);
+    var cap2 = new Array(M);
+    var cost2 = new Array(M);
+    for (var b4 = 0; b4 < M; b4++) {
+      var p4 = perm[b4];
+      tail2[p4] = aTail[b4];
+      head2[p4] = aHead[b4];
+      cap2[p4] = aCap[b4];
+      cost2[p4] = aCost[b4];
+    }
+    this.arcPermutation = perm;
+
+    // -- 可行性：只要最大流能顶满供给，就没有 INFEASIBLE
+    var maxFlow = ortoolsMaxFlowValue(augNodes, tail2, head2, cap2, source, sink);
+    if (maxFlow !== totalSupply) {
+      this.status = ORTOOLS_MCF_INFEASIBLE;
+      return null;
+    }
+
+    // -- GenericMinCostFlow 状态：残量用两条数组，resR 就是流量
+    var resF = new Int32Array(M);
+    var resR = new Int32Array(M);
+    for (var r0 = 0; r0 < M; r0++) resF[r0] = cap2[r0];
+    var excess = new Int32Array(augNodes);
+    excess[source] = maxFlow;
+    excess[sink] = -maxFlow;
+    var pot = new Float64Array(augNodes);
+
+    // -- ScaleCosts：factor = 增广节点数 + 1
+    var factor = augNodes + 1;
+    var scost = new Float64Array(M);
+    var epsilon = 1;
+    for (var s2 = 0; s2 < M; s2++) {
+      var sc = cost2[s2] * factor;
+      scost[s2] = sc;
+      var absSc = sc < 0 ? -sc : sc;
+      if (absSc > epsilon) epsilon = absSc;
+    }
+
+    // -- 每节点弧序：反向弧（按正向 index 升序）+ 正向出弧（新 index 升序）
+    var inArcs = [];
+    var outArcs = [];
+    for (var v0 = 0; v0 < augNodes; v0++) {
+      inArcs.push([]);
+      outArcs.push([]);
+    }
+    for (var v1 = 0; v1 < M; v1++) {
+      outArcs[tail2[v1]].push(v1);
+      inArcs[head2[v1]].push(v1);
+    }
+    var seqOff = new Int32Array(augNodes);
+    var seqLen = new Int32Array(augNodes);
+    var seqArr = [];
+    for (var v2 = 0; v2 < augNodes; v2++) {
+      seqOff[v2] = seqArr.length;
+      var inc = inArcs[v2];
+      var outg = outArcs[v2];
+      for (var i2 = 0; i2 < inc.length; i2++) seqArr.push(-inc[i2] - 1); // 反向弧编码 = ~f
+      for (var o2 = 0; o2 < outg.length; o2++) seqArr.push(outg[o2]);
+      seqLen[v2] = inc.length + outg.length;
+    }
+    var seq = Int32Array.from(seqArr);
+    var firstAdm = new Int32Array(augNodes); // 相对位置；== seqLen 即 kNilArc
+
+    function arcHead(enc) { return enc >= 0 ? head2[enc] : tail2[-enc - 1]; }
+    function arcCost(enc) { return enc >= 0 ? scost[enc] : -scost[-enc - 1]; }
+    function arcRes(enc) { return enc >= 0 ? resF[enc] : resR[-enc - 1]; }
+
+    function pushFlow(amount, enc, tailNode) {
+      if (enc >= 0) {
+        resF[enc] -= amount;
+        resR[enc] += amount;
+      } else {
+        var f = -enc - 1;
+        resR[f] -= amount;
+        resF[f] += amount;
+      }
+      excess[tailNode] -= amount;
+      excess[arcHead(enc)] += amount;
+    }
+
+    function isAdmissible(enc, tailPotential) {
+      return arcRes(enc) > 0 && arcCost(enc) + tailPotential - pot[arcHead(enc)] < 0;
+    }
+
+    var numRelabels = 0;
+
+    function nodeHasAdmissibleArc(node) {
+      var tp = pot[node];
+      var off = seqOff[node];
+      for (var p = firstAdm[node]; p < seqLen[node]; p++) {
+        var enc = seq[off + p];
+        if (isAdmissible(enc, tp)) {
+          firstAdm[node] = p;
+          return true;
+        }
+      }
+      return false;
+    }
+
+    // Relabel：min_non_admissible_potential 取 max（不是 min），游标回退规则照抄 C++
+    function relabel(node) {
+      numRelabels++;
+      var guaranteed = pot[node] - epsilon;
+      var maxNonAdm = -Infinity;
+      var prevMax = -Infinity;
+      var firstArcPos = -1;
+      var off = seqOff[node];
+      var len = seqLen[node];
+      for (var p = 0; p < len; p++) {
+        var enc = seq[off + p];
+        if (!(arcRes(enc) > 0)) continue;
+        var m = pot[arcHead(enc)] - arcCost(enc);
+        if (m > guaranteed) {
+          pot[node] = guaranteed;
+          firstAdm[node] = p;
+          return true;
+        }
+        if (m > maxNonAdm) {
+          prevMax = maxNonAdm;
+          maxNonAdm = m;
+          firstArcPos = p;
+        }
+      }
+      if (maxNonAdm === -Infinity) {
+        if (excess[node] !== 0) {
+          self.status = ORTOOLS_MCF_INFEASIBLE;
+          return false;
+        }
+        pot[node] = guaranteed;
+        firstAdm[node] = len; // kNilArc
+        return true;
+      }
+      var newPot = maxNonAdm - epsilon;
+      pot[node] = newPot;
+      firstAdm[node] = prevMax <= newPot ? firstArcPos : 0;
+      return true;
+    }
+
+    function discharge(node, stack) {
+      var off = seqOff[node];
+      var len = seqLen[node];
+      while (true) {
+        var tailPotential = pot[node];
+        for (var p = firstAdm[node]; p < len; p++) {
+          var enc = seq[off + p];
+          if (!isAdmissible(enc, tailPotential)) continue;
+          var head = arcHead(enc);
+          // 前瞻：head 也接不住就提前 relabel 它（C++ 同款，少了这句解就退化）
+          if (excess[head] >= 0 && !nodeHasAdmissibleArc(head)) {
+            if (!relabel(head)) return false;
+            if (!isAdmissible(enc, tailPotential)) continue;
+          }
+          var delta = Math.min(excess[node], arcRes(enc));
+          var headActiveBefore = excess[head] > 0;
+          pushFlow(delta, enc, node);
+          if (excess[head] > 0 && !headActiveBefore) stack.push(head);
+          if (excess[node] === 0) {
+            firstAdm[node] = p;
+            return true;
+          }
+        }
+        if (!relabel(node)) return false;
+      }
+    }
+
+    var alpha = 5;
+    var ok = true;
+    do {
+      epsilon = Math.max(Math.trunc(epsilon / alpha), 1);
+
+      // SaturateAdmissibleArcs：节点升序、从游标起、推满，完事一律置 kNilArc
+      for (var sv = 0; sv < augNodes; sv++) {
+        var stp = pot[sv];
+        var soff = seqOff[sv];
+        var slen = seqLen[sv];
+        for (var sp = firstAdm[sv]; sp < slen; sp++) {
+          var senc = seq[soff + sp];
+          if (isAdmissible(senc, stp)) pushFlow(arcRes(senc), senc, sv);
+        }
+        firstAdm[sv] = slen;
+      }
+
+      // InitializeActiveNodeStack：节点升序 push，LIFO 弹出
+      var stack = [];
+      for (var av = 0; av < augNodes; av++) if (excess[av] > 0) stack.push(av);
+
+      while (stack.length) {
+        if (numRelabels >= augNodes) {
+          numRelabels = 0;
+          if (self.usePriceUpdate) {
+            // 原版默认关；真开了就得复刻 UpdatePrices，不能静默算错
+            throw new Error('OrToolsMinCostFlow: usePriceUpdate=true 的 UpdatePrices 未实现');
+          }
+        }
+        var node = stack.pop();
+        if (!discharge(node, stack)) {
+          ok = false;
+          break;
+        }
+      }
+      if (!ok) break;
+    } while (epsilon !== 1);
+
+    if (!ok) {
+      if (this.status === ORTOOLS_MCF_NOT_SOLVED) this.status = ORTOOLS_MCF_INFEASIBLE;
+      return null;
+    }
+    this.status = ORTOOLS_MCF_OPTIMAL;
+
+    // Flow(arc) = resR[perm[arc]]（原弧在前，增广弧在后；增广弧 cost 0 不影响成本）
+    this.flows = new Array(numArcs);
+    var totalCost = 0;
+    for (var fa = 0; fa < numArcs; fa++) {
+      var pf = perm[fa];
+      var amt = resR[pf];
+      this.flows[fa] = amt;
+      totalCost += cost2[pf] * amt;
+    }
+    this.optimalCost = totalCost;
+    this.epsilon = epsilon;
+    return { flows: this.flows, optimalCost: this.optimalCost };
   };
 
   // ---------------------------------------------------------------- GraphData
@@ -1178,7 +1610,9 @@
    * 这里返回 null（原版上层靠这个降级）。
    */
   OrToolsFlowComputer.prototype.compute_flow = function (islands, graphData) {
-    var solver = new MinCostFlow();
+    // 默认走原来的 SPFA：逐弧忠实的 OrToolsMinCostFlow 单步要 500ms 级，真机 tick 500ms 顶不住。
+    // GB_MCF_ORTOOLS=1 才启用（对拍/研究用），GB_MCF_SPFA=1 保留为强制回退（两个都不设 = SPFA）。
+    var solver = envFlag('GB_MCF_ORTOOLS') ? new OrToolsMinCostFlow() : new MinCostFlow();
     for (var a = 0; a < graphData.start_nodes.length; a++) {
       solver.addArcWithCapacityAndUnitCost(
         graphData.start_nodes[a],
@@ -1484,8 +1918,11 @@
   // flowgraph.js 也导出了 flow.MinCostFlow（networkx 那条路用它），本类同时支持两套 API，
   // 所以谁后加载都不会把对方弄坏；OrToolsMinCostFlow 是给本文件内部/外部明确指名的别名。
   flow.MinCostFlow = MinCostFlow;
-  flow.OrToolsMinCostFlow = MinCostFlow;
-  flow.SimpleMinCostFlow = MinCostFlow;
+  // 逐弧忠实版（cost-scaling push-relabel）：名字对齐 ortools 的 SimpleMinCostFlow。
+  // 注意它只支持 ortools 那套 addArcWithCapacityAndUnitCost/setNodeSupply/solve() API，
+  // networkx 的 add_node/add_edge/solve(demands) 仍走上面的 MinCostFlow。
+  flow.OrToolsMinCostFlow = OrToolsMinCostFlow;
+  flow.SimpleMinCostFlow = OrToolsMinCostFlow;
   flow.OrToolsGraphData = OrToolsGraphData;
   flow.DirectOrToolsGraphBuilder = DirectOrToolsGraphBuilder;
   flow.OrToolsFlowComputer = OrToolsFlowComputer;

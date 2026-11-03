@@ -1986,7 +1986,10 @@
       }
     }
 
-    var largeTileThreshold = Math.trunc(Math.pow(Math.max(16, map.players[player].standingArmy), 0.5));
+    // py 是 map.players[-1] 取末位玩家；目标未锁定时上游会传 -1，裸下标在这里炸 undefined.standingArmy。
+    var playerObj = map.players[player];
+    if (!playerObj && player < 0 && map.players.length) playerObj = map.players[map.players.length - 1];
+    var largeTileThreshold = Math.trunc(Math.pow(Math.max(16, (playerObj ? playerObj.standingArmy : 0)), 0.5));
 
     var pathTile = path.get_first_move().source;
     var pathTileDistSum = enemyDistMap.raw[pathTile.tile_index] + playerDistMap.raw[pathTile.tile_index];

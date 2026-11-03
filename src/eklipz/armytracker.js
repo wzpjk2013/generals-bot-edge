@@ -1586,7 +1586,9 @@
     else incAmount = 500 / incTiles.length;
 
     for (var k = 0; k < incTiles.length; k++) {
-      this.emergenceLocationMap[player].raw[incTiles[k][0].tile_index] += incAmount;
+      // 上面 1569 行已经把 player 折成 emgMap（py 的 list[-1] 语义），这里再走裸下标
+      // 在 player == -1（中立格当涌现来源）时只会拿到 undefined。
+      emgMap.raw[incTiles[k][0].tile_index] += incAmount;
     }
   };
 
@@ -2924,17 +2926,60 @@
     }
   };
 
+  /* py 侧所有按玩家建的表都是「在构造时按当时 map.players 的长度建满」的，长度恒等；
+   * JS 在这条同步窗口里（FFA 掉线 / 重连 / 旁观入座）可能短一截，于是 arr[i]（i 合法但越界）
+   * 也是 undefined。这里按「缺表就地建空表」补齐，形状与构造函数里逐个 push 的完全一致。
+   * 只在长度不足时动作，正常局面每回合就是一次 length 比较。 */
+  P._sync_player_tables = function () {
+    var map = this.map;
+    var n = map.players.length;
+    if (!n) return;
+    var total = n;
+    if (this.emergenceLocationMap && this.emergenceLocationMap.length > total) {
+      total = this.emergenceLocationMap.length;
+    }
+    var specs = [
+      ['connectedByPlayer', function () { return new Set(); }],
+      ['coreConnectedByPlayer', function () { return new Set(); }],
+      ['valid_general_positions_by_player', function () { return new MapMatrixSet(map); }],
+      ['tiles_ever_owned_by_player', function () { return new MapMatrixSet(map); }],
+      ['seen_tiles_by_player', function () { return new MapMatrixSet(map); }],
+      ['visible_tiles_by_player', function () { return new MapMatrixSet(map); }],
+      ['uneliminated_emergence_events', function () { return new Map(); }],
+      ['unrecaptured_emergence_events', function () { return new Set(); }],
+      ['discovered_enemy_land_connector_tiles', function () { return new Set(); }],
+      ['uneliminated_emergence_event_city_perfect_info', function () { return new Set(); }],
+      ['unconnectable_tiles', function () { return new Set(); }],
+      ['player_connected_tiles', function () { return new Set(); }],
+      ['emergenceLocationMap', function () { return new MapMatrix(map, 0.0); }],
+      ['initial_expansion_tile_counts', function () { return 0; }],
+      ['should_recalc_fog_land_by_player', function () { return true; }],
+      ['player_launch_timings', function () { return 0; }]
+    ];
+    for (var s = 0; s < specs.length; s++) {
+      var arr = this[specs[s][0]];
+      if (!arr || typeof arr.push !== 'function') continue;
+      while (arr.length < total) arr.push(specs[s][1]());
+    }
+  };
+
   P.get_tile_emergence_for_player = function (tile, player) {
     if (player === -1) return 0;
     return this.emergenceLocationMap[player].raw[tile.tile_index];
   };
 
   P.get_prediction_value = function (player, tile) {
-    return this.emergenceLocationMap[player].raw[tile.tile_index];
+    // 与上面 get_tile_emergence_for_player 同一族：py 的 list[-1] 落到末位玩家，
+    // 这里用 byPlayer 折一下，拿不到表就当 0，别把 undefined 抛给下游。
+    var emgMap = byPlayer(this.emergenceLocationMap, player);
+    if (!emgMap) return 0;
+    return emgMap.raw[tile.tile_index];
   };
 
   P.get_prediction_value_x_y = function (player, x, y) {
-    return this.emergenceLocationMap[player].raw[this.map.GetTile(x, y).tile_index];
+    var emgMap = byPlayer(this.emergenceLocationMap, player);
+    if (!emgMap) return 0;
+    return emgMap.raw[this.map.GetTile(x, y).tile_index];
   };
 
   P._reset_player_emergences = function (player) {
@@ -4214,7 +4259,10 @@
   };
 
   P._connect_discovered_enemy_land_connector_tiles = function (player, connectedSet, bannedTiles) {
-    var tiles = Array.from(this.discovered_enemy_land_connector_tiles[player]);
+    // py 这边是按 map.players 建的表，player 为 -1 时落到末位玩家；JS 裸下标会给 undefined。
+    var connectorSet = byPlayer(this.discovered_enemy_land_connector_tiles, player);
+    if (!connectorSet) return;
+    var tiles = Array.from(connectorSet);
     for (var i = 0; i < tiles.length; i++) {
       var tile = tiles[i];
       if (
@@ -4223,7 +4271,7 @@
           return !t.visible;
         })
       ) {
-        this.discovered_enemy_land_connector_tiles[player].delete(tile);
+        connectorSet.delete(tile);
         continue;
       }
       if (connectedSet.has(tile) || connectedSet.size === 0) continue;

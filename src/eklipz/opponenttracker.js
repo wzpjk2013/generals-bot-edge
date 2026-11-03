@@ -710,26 +710,39 @@
     return ret;
   };
 
+  /* Python 里 _team_lookup_by_player 就是 team_ids_by_player_index，末位挂着伪团队 -1，
+   * 所以 lookup[-1] 得 -1；再拿 -1 去下标 team 维度表又落到末元素（中立队）。
+   * JS 这两步都会拿到 undefined，后面 .cityCount / [turn] 立刻炸，按 list 语义折叠一下。 */
+  function pyLastIndex(arr, idx) {
+    if (!arr || arr.length === 0) return undefined;
+    if (idx >= 0 && idx < arr.length) return arr[idx];
+    return arr[arr.length - 1];
+  }
+
   OT.get_last_cycle_stats_by_team = function (team, cyclesToGoBack) {
     if (cyclesToGoBack === undefined) cyclesToGoBack = 0;
     var lastCycleTurn = this.get_last_cycle_end_turn(cyclesToGoBack);
-    var v = this.team_cycle_stats_history[team][lastCycleTurn];
+    var hist = pyLastIndex(this.team_cycle_stats_history, team);
+    if (!hist) return null;
+    var v = hist[lastCycleTurn];
     return v === undefined ? null : v;
   };
 
   OT.get_last_cycle_stats_by_player = function (player, cyclesToGoBack) {
-    return this.get_last_cycle_stats_by_team(this._team_lookup_by_player[player], cyclesToGoBack);
+    return this.get_last_cycle_stats_by_team(pyLastIndex(this._team_lookup_by_player, player), cyclesToGoBack);
   };
 
   OT.get_last_cycle_score_by_team = function (team, cyclesToGoBack) {
     if (cyclesToGoBack === undefined) cyclesToGoBack = 0;
     var lastCycleTurn = this.get_last_cycle_end_turn(cyclesToGoBack);
-    var v = this.team_score_data_history[team][lastCycleTurn];
+    var hist = pyLastIndex(this.team_score_data_history, team);
+    if (!hist) return null;
+    var v = hist[lastCycleTurn];
     return v === undefined ? null : v;
   };
 
   OT.get_last_cycle_score_by_player = function (player, cyclesToGoBack) {
-    return this.get_last_cycle_score_by_team(this._team_lookup_by_player[player], cyclesToGoBack);
+    return this.get_last_cycle_score_by_team(pyLastIndex(this._team_lookup_by_player, player), cyclesToGoBack);
   };
 
   OT.get_player_gather_queue = function (player) {
@@ -749,15 +762,16 @@
 
   OT.get_team_players_by_player = function (player) {
     if (player === -1) return [-1];
-    return this._players_lookup_by_team[this._team_lookup_by_player[player]];
+    var res = pyLastIndex(this._players_lookup_by_team, pyLastIndex(this._team_lookup_by_player, player));
+    return res || [];
   };
 
   OT.get_current_cycle_stats_by_player = function (player) {
-    return this.current_team_cycle_stats[this._team_lookup_by_player[player]];
+    return pyLastIndex(this.current_team_cycle_stats, pyLastIndex(this._team_lookup_by_player, player));
   };
 
   OT.get_current_team_scores_by_player = function (player) {
-    return this.current_team_scores[this._team_lookup_by_player[player]];
+    return pyLastIndex(this.current_team_scores, pyLastIndex(this._team_lookup_by_player, player));
   };
 
   OT.did_player_make_fog_capture_move = function (player) {
@@ -2114,6 +2128,8 @@
 
   OT.get_team_unknown_city_count_by_player = function (player) {
     var team = this.get_current_team_scores_by_player(player);
+    // 目标还没锁定（-1）或队伍槽位没初始化时 python 拿到的是空 TeamStats，这里退化成 0
+    if (!team) return 0;
     var unkCount = team.cityCount;
     for (var li = 0; li < team.livingPlayers.length; li++) {
       var pIdx = team.livingPlayers[li];
