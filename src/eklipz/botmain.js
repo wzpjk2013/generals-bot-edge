@@ -1808,11 +1808,33 @@
     if (!this._is_all_in() && map.remainingPlayers <= 3 && earlyRetakeTurns > 0
       && needToKillTiles.length > 0 && timingTurn >= this.timings.quickExpandTurns) {
       var actualGatherTurns = earlyRetakeTurns;
-      var gatherNodes = _call(this, 'Gather', 'knapsack_depth_gather',
-        [map, needToKillTiles.slice(), actualGatherTurns, defenseCriticalTileSet, this.general.player(),
-          false, null, true, true], null);
-      if (!gatherNodes) {
-        // Gather.knapsack_depth_gather 未移植 → 退化到 BotGatherOps 的 build_mst 路径
+      // bot_ek0x45.py:1578-1587 早期夺回：原版用关键字传参，
+      //   Gather.knapsack_depth_gather(self._map, list(needToKillTiles), actualGatherTurns,
+      //       negativeTiles=defenseCriticalTileSet, searchingPlayer=self.general.player,
+      //       incrementBackward=False, viewInfo=…, ignoreStartTile=True, useTrueValueGathered=True)
+      // 两处旧错：① py 里 `Gather` 是包导出（Gather/__init__.py），JS 的真身是
+      // EK.GatherDepthIterative（gathermax.js:2439），原来按 'Gather' 取永远取不到；
+      // ② 就算名字对了，按位置传也会错位 —— GatherDepthIterative.py:1132 起第 4 个形参是
+      // targetArmy，而旧代码把 defenseCriticalTileSet 塞在那里。所以这里改用 gathermax.js:2419
+      // 支持的具名参数入口，逐字对上 py 的关键字。
+      // viewInfo：py 是 `self.info_render_gather_values`（bot_ek0x45.py:422 默认 False）才传，
+      // 本移植没有那个开关，等价于默认 False。
+      var kdFn = EK.GatherDepthIterative && EK.GatherDepthIterative.knapsack_depth_gather;
+      var gatherNodes;
+      if (typeof kdFn === 'function') {
+        gatherNodes = _call(this, 'GatherDepthIterative', 'knapsack_depth_gather', [{
+          map: map,
+          startTiles: needToKillTiles.slice(),
+          turns: actualGatherTurns,
+          negativeTiles: defenseCriticalTileSet,
+          searchingPlayer: this.general.player(),
+          incrementBackward: false,
+          viewInfo: null,
+          ignoreStartTile: true,
+          useTrueValueGathered: true
+        }], null);
+      } else {
+        // 求解器缺失才退化；py 没有这条兜底，所以只在依赖真的不在时走
         var erRes = EK.BotGatherOps.get_gather_to_target_tiles(this, needToKillTiles, 0.05,
           actualGatherTurns, defenseCriticalTileSet, -1, true, null, false, false, 0, null, null, null, false, false);
         gatherNodes = erRes[3];

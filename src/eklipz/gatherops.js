@@ -80,10 +80,20 @@
   }
 
   // 「有则调用、无则记录」的派发。模块缺失时返回 dflt，绝不抛。
+  //
+  // EK 里的模块有两种形态：纯命名空间对象（EK.search）和构造函数（EK.BoardAnalyzer）。
+  // 后者的方法挂在 prototype 上，构造器对象本身一个自有属性都没有 —— 只查 mod[fnName]
+  // 会把「实现其实在」的实例方法误判成缺失（BoardAnalyzer.find_flank_leaves 就是这么丢的）。
+  // 本文件所有调用点都是「模块.函数(实例, ...)」的形状，所以取到 prototype 方法时用第一个
+  // 实参当接收者。没有对象实参时不猜，仍旧按缺失处理。
   function q(moduleName, fnName, args, dflt) {
     var mod = EK[moduleName];
     if (mod && typeof mod[fnName] === 'function') {
       return mod[fnName].apply(mod, args);
+    }
+    if (mod && mod.prototype && typeof mod.prototype[fnName] === 'function'
+      && args && args.length > 0 && args[0] && typeof args[0] === 'object') {
+      return mod.prototype[fnName].apply(args[0], Array.prototype.slice.call(args, 1));
     }
     noteMissing(moduleName + '.' + fnName);
     return dflt;
