@@ -419,6 +419,9 @@
       this.initial_expansion_tile_counts.push(0);
       this.should_recalc_fog_land_by_player.push(true);
     }
+    // 3045/3051 用 curTile.player() 当下标写，而中立格的 player() 是 -1；
+    // py list[-1] 写末位，JS 直接写会造出 "-1" 这么一个游离属性。
+    this.should_recalc_fog_land_by_player = pyArray(this.should_recalc_fog_land_by_player);
 
     this.unaccounted_tile_diffs = new Map();
 
