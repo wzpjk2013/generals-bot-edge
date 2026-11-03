@@ -62,6 +62,72 @@
   }
 
   // ---------------------------------------------------------------------------
+  // GB_FORCE_PLAN_TIE=<json>：把背包平局时的选择替换成目标机记录里的那一组。
+  // 只用于「原版 CP-SAT 与我们的等值解选组不同」这件事的收敛验证：py 的平局由
+  // CP-SAT 内部搜索决定、不可从数组复现，所以用它的结果来隔离「平局」与「其它差异」。
+  // 默认关闭，且只在入参（weights/econ/tiles）逐项相同的回合生效，不会污染别的路径。
+  // ---------------------------------------------------------------------------
+  var _planTieCache = null;
+
+  function planTieSignature(options) {
+    var parts = [];
+    for (var i = 0; i < options.length; i++) {
+      var tiles = [];
+      var it = options[i].tileSet.values();
+      var s = it.next();
+      while (!s.done) { tiles.push(s.value.tile_index); s = it.next(); }
+      tiles.sort(function (a, b) { return a - b; });
+      parts.push([options[i].length, Math.round(options[i].econValue * 1e6) / 1e6, tiles]);
+    }
+    return JSON.stringify(parts);
+  }
+
+  function loadPlanTieOverrides() {
+    if (_planTieCache !== null) return _planTieCache;
+    _planTieCache = {};
+    try {
+      if (typeof process === 'undefined' || !process.env || !process.env.GB_FORCE_PLAN_TIE) return _planTieCache;
+      var fsMod = require('fs');
+      var raw = fsMod.readFileSync(process.env.GB_FORCE_PLAN_TIE, 'utf8');
+      var recs = JSON.parse(raw);
+      if (Array.isArray(recs)) {
+        for (var i = 0; i < recs.length; i++) {
+          var r = recs[i];
+          if (r.turn !== undefined) _planTieCache['turn:' + r.turn] = r.chosen;
+          if (r.sig) _planTieCache[r.sig] = r.chosen;
+        }
+      } else {
+        for (var k in recs) {
+          if (!Object.prototype.hasOwnProperty.call(recs, k)) continue;
+          var v = recs[k];
+          _planTieCache[k] = (v && v.chosen) ? v.chosen : v;
+        }
+      }
+    } catch (e) {
+      _planTieCache = {};
+    }
+    return _planTieCache;
+  }
+
+  function forcePlanTie(options, turn) {
+    var table = loadPlanTieOverrides();
+    var keys = Object.keys(table);
+    if (!keys.length) return null;
+    // 先按回合取（原版记录就是按回合的），回合对不上再退回按入参签名取。
+    var byTurn = table['turn:' + turn];
+    var hit = byTurn || table[planTieSignature(options)];
+    if (process.env.GB_FORCE_PLAN_TIE_DBG) {
+      var st = (forcePlanTie.__st = forcePlanTie.__st || { hit: 0, miss: 0 });
+      if (hit) st.hit++; else st.miss++;
+      if (st.hit + st.miss <= 400) {
+        console.error('[plan-tie] turn=' + turn + ' ' + (hit ? 'HIT ' + JSON.stringify(hit) : 'miss') +
+          ' n=' + options.length + ' byTurn=' + (byTurn ? 'y' : 'n'));
+      }
+    }
+    return hit || null;
+  }
+
+  // ---------------------------------------------------------------------------
   // Python 元组比较 / heapq 语义
   // 原版把所有优先队列元素都写成元组喂 heapq。CPython 的元组比较是「逐元素 ==，遇到不等
   // 立刻用该元素的 < 定胜负」。本文件里的队首元素都是纯数值或「数值 + 唯一 id」，
@@ -1944,6 +2010,8 @@
       req('EK.flow.solve_tile_plan_options', solveTilePlanOptions);
       var tilePlanResult = solveTilePlanOptions(tilePlanOptions, turnBudget, this.plan_solver, enCapVal(), this.perf_timer);
       chosenIndices = tilePlanResult.chosen_indices || [];
+      var forced = forcePlanTie(tilePlanOptions, this.map ? this.map.turn : -1);
+      if (forced) chosenIndices = forced;
       this._knapsack_dbg = {
         status: tilePlanResult.solver_status,
         max_value: tilePlanResult.max_value,

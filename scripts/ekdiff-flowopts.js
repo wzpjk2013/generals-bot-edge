@@ -43,6 +43,96 @@ function loadEK() {
   return EK;
 }
 
+// 背包入参留档：平局（value/weight 相同、tile 冲突）时选谁，只取决于数组顺序与 tile 集合，
+// 所以必须把两侧完整数组拿出来逐项比，而不是只看最终 solution 的键。
+function installTilePlanRecorder(ns) {
+  if (!ns || typeof ns.solve_tile_plan_options !== 'function') return;
+  if (ns.__tilePlanRecorderInstalled) return;
+  ns.__tilePlanRecorderInstalled = true;
+  const orig = ns.solve_tile_plan_options;
+  ns.solve_tile_plan_options = function (options, turnBudget, solver, valueMultiple, perfTimer) {
+    const rec = {};
+    try {
+      rec.budget = turnBudget;
+      rec.solver = String(solver);
+      rec.vm = Number(valueMultiple);
+      rec.weights = [];
+      rec.tiles = [];
+      rec.econ = [];
+      for (const opt of (options || [])) {
+        rec.weights.push(opt.length);
+        const set = opt.tileSet instanceof Set ? Array.from(opt.tileSet) : Array.from(opt.tileSet || []);
+        const idx = set.map(function (t) { return typeof t === 'number' ? t : t.tile_index; });
+        idx.sort((a, b) => a - b);
+        rec.tiles.push(idx);
+        rec.econ.push(Number(Number(opt.econValue).toFixed(6)));
+      }
+    } catch (e) {
+      rec.inputError = String(e && e.message);
+    }
+    const res = orig.call(this, options, turnBudget, solver, valueMultiple, perfTimer);
+    try {
+      rec.chosen = Array.from(res.chosen_indices || []);
+      rec.maxValue = res.max_value;
+      rec.chosenWeight = rec.chosen.reduce(function (n, i) { return n + (options[i].length || 0); }, 0);
+    } catch (e) {
+      rec.resultError = String(e && e.message);
+    }
+    const dbg = (global.__FEDBG = global.__FEDBG || {});
+    (dbg.plans = dbg.plans || []).push(rec);
+    return res;
+  };
+}
+
+function installKnapsackRecorder(ek) {
+  const flow = ek.flow;
+  // 实际生效的是 EK.knapsack（flowexpansion 先查 Knap.solve_tile_plan_options），
+  // 两个命名空间都挂一遍，避免只挂到没人用的那个。
+  installTilePlanRecorder(flow);
+  installTilePlanRecorder(flow && flow.GatherCaptureGroupKnapsacker);
+  installTilePlanRecorder(ek.knapsack);
+  if (!flow || typeof flow.solve_grouped_knapsack_input !== 'function') return;
+  if (flow.__knapRecorderInstalled) return;
+  const orig = flow.solve_grouped_knapsack_input;
+  flow.solve_grouped_knapsack_input = function (inputData, noLog) {
+    const rec = {};
+    try {
+      rec.budget = inputData.turn_budget;
+      rec.groups = Array.from(inputData.groups || []);
+      rec.weights = Array.from(inputData.weights || []);
+      rec.values = Array.from(inputData.values || []);
+      rec.econ = Array.from(inputData.econ_values || []).map((v) => Number(Number(v).toFixed(6)));
+      rec.tiles = (inputData.item_tile_sets || []).map(function (s) {
+        const arr = s instanceof Set ? Array.from(s) : Array.from(s || []);
+        arr.sort((a, b) => a - b);
+        return arr;
+      });
+      const isExt = inputData.is_external_item;
+      rec.ext = [];
+      for (let i = 0; i < rec.groups.length; i++) {
+        if (isExt instanceof Set) rec.ext.push(isExt.has(i));
+        else if (isExt && typeof isExt.get === 'function') rec.ext.push(!!isExt.get(i));
+        else rec.ext.push(false);
+      }
+      rec.maxIter = inputData.max_iterations;
+    } catch (e) {
+      rec.inputError = String(e && e.message);
+    }
+    const res = orig.call(this, inputData, noLog);
+    try {
+      rec.chosen = Array.from(res.chosen_indices || []);
+      rec.maxValue = res.max_value;
+      rec.chosenWeight = res.chosen_weight;
+    } catch (e) {
+      rec.resultError = String(e && e.message);
+    }
+    const dbg = (global.__FEDBG = global.__FEDBG || {});
+    (dbg.knaps = dbg.knaps || []).push(rec);
+    return res;
+  };
+  flow.__knapRecorderInstalled = true;
+}
+
 // 逐弧流量留档：两侧都按「调用序号 + 原 node id」落盘，键对不上就判「不是同一张图」而不是「流量不同」。
 // 挂 compute_flow 而不是求解器本身，因为只有这里同时有 idx_to_node 和 flows。
 function installSolveRecorder(ek) {
@@ -484,6 +574,7 @@ function main() {
 
   const ek = loadEK();
   installSolveRecorder(ek);
+  installKnapsackRecorder(ek);
   const recs = readRecords(dumpFile);
   if (!recs.length) throw new Error('记录为空: ' + dumpFile);
   let startRec = null;
@@ -639,6 +730,8 @@ function main() {
         edges: global.__FEDBG.edges || [],
         solution: global.__FEDBG.solution || [],
         knap_input: global.__FEDBG.knap_input || null,
+        knaps: global.__FEDBG.knaps || [],
+        plans: global.__FEDBG.plans || [],
         solves: global.__FESOLVES || [],
         mapTiles: global.__FEDBG.mapTiles || null,
       },

@@ -521,3 +521,82 @@ py 那里是 `find_move` 末尾的 assert，被 `BotHost.make_move(rethrow=False
 值得注意的形态：**我们每一档的地都比对面多，但局拖得极长**（kutu 429 回合、
 oim 650 回合，地 182:33 还打不死）。说明瓶颈在"把优势换成将军击杀"这一段，
 不在铺地——这和 1.1.x 自制引擎时代量到的"攒不出一拳"是同一个病，只是现在换了实现。
+
+## 2026-11-03 决策级收敛：CP-SAT 平局不可复刻（flowopts 11/11，move 50/51）
+
+### 结论先说
+
+- `ekdiff-flowopts` 在 `GB_MCF_ORTOOLS=1` + `GB_FORCE_PLAN_TIE=<py记录>` 下 **11/11 = 100%**（此前 3/11，生产默认下 0/11）。
+- `ekdiff-move gm1` **50/51 = 98.04%**（此前 49/51），只剩 **T50**；T49 已消。
+- 三个残差来源，按贡献排序：**① 生产默认的 SPFA 求解器在 flow_to 层不等价**（不是"只是慢一点"）；
+  **② CP-SAT 的平局选组**（等值不等解，不可从数组复现）；**③ T50 还有一处独立差异**，位于背包之后。
+- T51 的 `must supply a player for moves from fog ... fromTile 18,6 -> toTile 18,5` 是 T50 分叉的二手症状，
+  T50 修好前它不会消失（本轮 50/51 时它仍在）。
+
+### 一、`plan_solver` 走的是 CP-SAT，不是 MKCP
+
+py `BehaviorAlgorithms/FlowExpansion.py:272` 是 `self.plan_solver = PlanSolver.CpSat`，`:2987` 判
+`!= MkcpPlusGreedyConflictResolution` 为真 ⇒ 线上真正跑的是 `solve_tile_plan_options(solver=CpSat)`；
+`solve_grouped_knapsack_input` **不会被调用**。JS `flowexpansion.js:1931/1945` 走同一条分支。
+
+模型（`Gather/GatherCaptureGroupKnapsacker.py:_solve_tile_plan_option_arrays_with_cp_sat`）：
+每个 option 一个 bool、`sum(weight*x) <= turn_budget`、每个 tile `sum(x) <= 1`、`maximize(sum(value*x))`，
+`value = int(round(econValue * 2.05))`。没有次级目标 ⇒ 平局由 CP-SAT 的 presolve/LP 分支序决定。
+
+### 二、四组数字（gm1 T40–T50，入参对齐后）
+
+| 项 | 结果 |
+| --- | --- |
+| `options` 的 `length` / `econValue` / `tileSet` | **11/11 逐项相等** |
+| `max_value` | **11/11 相同** |
+| `chosen_weight` | **11/11 相同** |
+| `chosen_indices` | **3 同 / 8 不同**（T45/T46/T47 是最优解唯一的回合） |
+
+⇒ 我们的替代求解器**是最优的**，差别只在"同一批最优解里挑了哪一组"。
+
+### 三、枚举全部最优解：没有可读规律
+
+`_research/ties-probe.js` 枚举（含 tile 互斥约束）：
+
+| 回合 | T40 | T41 | T42 | T43 | T44 | T45 | T46 | T47 | T48 | T49 | T50 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 最优解个数 | 7 | 5 | 8 | 9 | 5 | 1 | 1 | 1 | 21 | 8 | 2 |
+| py 选中组在枚举里的位次 | 5 | 4 | 0 | 8 | 0 | 0 | 0 | 0 | 4 | 5 | 1 |
+
+试过 8 条确定性规则，**没有一条能覆盖全部 8 个平局回合**：
+
+| 规则 | 命中回合 |
+| --- | --- |
+| index 和最小 / 最大 | 只 T43、T45–T47 |
+| 首项 index 最大 | 只 T43、T45–T47 |
+| 字典序最小 / 最大 | 只 T43、T45–T47 |
+| 项数最多 | 只 T42、T44–T47 |
+| tile 和最小 / 最大 | 只 T45–T47、T50 |
+
+T40 / T41 / T48 / T49 四条规则全落空 ⇒ 平局选择不是数组内容的函数。
+
+### 四、验证方法与它的边界
+
+`GB_FORCE_PLAN_TIE=<json>`（默认关，**绝不进生产路径**，`src/eklipz/flowexpansion.js:forcePlanTie`）：
+按**回合**把 `chosen_indices` 换成 py 记录里的那一组，其余回合照常自己选。
+- 按回合取而不是按入参签名取，是因为 move 脚手架里每回合的 option 数（36/36/34/40/34/28/23/18/13/8/82）
+  与 py dump 逐回合一致，签名匹配只在 flowopts 脚手架成立。
+- 实测命中 11 次（T40–T50），option 个数与 py 完全相同 ⇒ 这 11 个回合喂进背包的数组是同一批。
+
+### 五、SPFA 不是"慢一点"，是数值不等价
+
+同一份输入、只切求解器：
+- `GB_MCF_ORTOOLS=1`：`contribs` 与 py **11/11 逐项相等**，`flowopts` 11/11。
+- 默认 SPFA：`contribs[0]` 的 target 势能 `py=41.315952380952375 / js=36.86785714285715`（T40），
+  T41 `43.55 / 36.87`…即 `flow_to` 的流向不同 ⇒ routed_flow 不同 ⇒ 势能、经济值、plan 值全偏。
+- 决策影响可测：`GB_FORCE_PLAN_TIE` 下，OrTools 得 50/51，SPFA 得 49/51 且 T49 的错法变了
+  （`py=17,4>18,4 js=17,3>17,2`）。
+
+⇒ 若要"逐招对齐"，生产必须走 `OrToolsMinCostFlow`；代价是实测 `gc 2` 从 ~439ms/步 到 ~521ms/步
+（本机同时有其它 node 进程时的读数；红线 400ms 是空闲机器的口径）。这条留给性能决策，不在本文件下结论。
+
+### 六、还剩下的那一处
+
+T50：option 数 82 与 py 相同、平局选择已强制成 py 的 `[10,69]`，js 仍走 `18,4>18,5` 而 py 走 `18,4>17,4`。
+⇒ 差异在背包之后的招法选择段，不在 flow / lookups / knapsack 三层（这三层在当前配置下已 100% 相等）。
+
