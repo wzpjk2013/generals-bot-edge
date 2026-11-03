@@ -427,4 +427,97 @@ expandStuck）在真口径下被打得更惨（我们地比对面多、兵比对
 
 要真口径下赢 kutu，得解决「攒不出一拳」：把 `supply()` 的 rail 从「最厚的先走
 一格」改成**朝一个集结点收敛的生成树**（Human.exe 的 gather：MST + 剪枝 + 补路），
-让后方的散兵真正并成一堆，而不是每回合往同一个方向各走一格。
+让后方的散兵真正并成一堆，而不是每回合往同一个方向走一格。
+
+---
+
+## 2026-11-03 移植线：真机崩溃根因、逐弧忠实 MCF、非法招来源
+
+这一节记的是 `src/eklipz`（Human.exe 移植版）在真机与擂台上的三类问题，以及
+"哪些看起来像 bug 其实不是"——后一类最费时间，写清楚免得下次再挖一遍。
+
+### 一、真机每回合抛 `Cannot read properties of undefined (reading 'raw')`
+
+根因不在 flow、不在扩张，而在**玩家号可以是 -1**。原版大量地方写 `arr[player]`，
+`player` 的三种来源都可能是 -1：
+
+- `tile.player()`：中立格 / 迷雾格是 -1；
+- `bot.targetPlayer`：还没锁定对手时是 -1；
+- `bot.general.player()` 之前的 `map.players[-1]`：py 的 `list[-1]` 取**末元素**。
+
+`Territory.py:28` 把领地距离矩阵建成 `[MapMatrix(map, 1000) for p in map.players]`，
+是 **list**；调用点 `territoryDistances[bot.targetPlayer]` 在 py 里 `[-1]` 合法，
+在 JS 里 `[-1]` 得 `undefined`，下一句 `.raw[tile_index]` 就炸。
+
+收口办法统一成「只拦 `'-N'` 键的 Proxy」：`map.js` 的 `negativeIndexArray`、
+`armytracker.js` 的 `byPlayer/pyArray`、`opponenttracker.js` 的 `pyIdx/pyArray/pyLastIndex`、
+`territory.js`/`botmain.js`/`targeting.js` 的就地 helper。正下标、`length`、方法调用
+全部原样走，正常路径零影响。
+
+**判据**（扫描时按这个过滤，否则一半是误报）：只有「普通数组 + 可能是 -1 的下标」
+才算缺陷；`Map/Set` 的 `.get(i)/.has(i)` 不算（py 那边也是 dict/set，键 -1 正常）；
+已用上述 helper 折过的不算。第二类缺陷是**表长度不够**（`map.players` 与
+`*_by_player` 在 FFA 掉线/重连/换人时短暂错位），按"缺表就地补空表"收口。
+
+### 二、`ortools` 的 min-cost-flow 可以逐弧复刻，但决策层不受它影响
+
+问题背景：`scripts/ekdiff-move.js` 在 gm1 上停在 49/51，T49/T50 与原件分叉。
+先怀疑是 min-cost-flow 的等成本多解选法不同（ortools 与自研 SSP+Johnson 选谁不一样）。
+
+结论分两步：
+
+1. **逐弧复刻成功**。照 `min_cost_flow.cc` 移植 cost-scaling push-relabel：
+   增广源汇（`source=num_nodes`/`sink=num_nodes+1`，原节点供给退化为 0，
+   只给 source/sink 设 `±maximum_flow`）、`Graph::Build` 的稳定计数排序、
+   每节点弧序 = 反向弧块（按正向 index 升序）+ 正向出弧块、`Refine` 按节点升序
+   `Saturate` + LIFO 活跃栈（先弹最大 index）、`Relabel` 里取 **max** 且游标回退规则
+   `previous_min <= new_pot ? first_arc : 序列头`、epsilon 序列 `max(eps/5,1)` 到 1。
+   验收：200 张随机图（67 可行、含 64 张退化多解）**逐弧流量全等**；
+   gm1/gA2/g3000 的 arc dump 12/12 FLOWS-EQUAL。
+   另外 python 侧节点编号是 `sorted(all_node_ids)` 排名（`OrToolsFlowDirectionFinder.py:1512`），
+   首次出现序会让逐弧对拍自欺。
+2. **但决策层数字一动不动**：`ekdiff-flowopts` 仍 0/11、`ekdiff-move` 仍 49/51。
+   残余差异的签名不是流量，是**势能/贡献值**（`target[0] py=[57,43.554] js=[57,52.904]`），
+   而且看起来是「同一序列错位 1~2 回合」（T41 js 的 `caps[5]=5.545` 正是 py T42 的值）。
+   ⇒ T49/T50 的根因在 `flowexpansion.js` 的贡献/势能时序，不在求解器。
+   因为单步 521ms（红线 400ms），`OrToolsMinCostFlow` **默认关**，`GB_MCF_ORTOOLS=1` 才开。
+
+顺带记两个"oracle 自己错、长得却像引擎错"的坑：
+- `ekdump_flowmincost.py` 曾把 `border_islands` dump 成 `sorted(unique_id)`，
+  而真实迭代序是 `tiles_by_army[0].tile_index` 升序 ⇒ 弧序整体错位；
+- `map.valid_spawns` 在 JS 里恒 null（py 解析地图 `g` 标记时建集合），
+  两边都退化成 `pathable_tiles`，不是任何崩溃的根因。
+
+### 三、非法招 `source.player() != general.player()`
+
+py 那里是 `find_move` 末尾的 assert，被 `BotHost.make_move(rethrow=False)` 吞掉，
+线上语义 = **这一回合 pass**。JS 原来把它 `throw` 出去，结果是面板红字 + 回落自制引擎，
+一局几十次。改成 log + `move = null`，**不做补救性挑招**（那才是行为偏离）。
+
+来源日志（`botmain.js` 的 `_log_invalid_move`）在 oim 档真跑出两条，`gatherRoot` /
+`expansionRoot` 均为 null、`target_player_gather_path` 起点正常，唯一有货的是
+`curPath=set` ⇒ 招来自 `bot.curPath`（`GatherCapturePlan`）残留首步，分两种：
+
+- source 在 `p-1`（迷雾格）：路径过期，该 pop 没 pop 或 pop 条件漏了
+  `source.player != bot.player.index` 这一半；
+- source/dest 都在敌方 `p1` 格里：整条路的**视角**就不是我们的
+  （`defense.js` 的 `_get_flank_vision_defense_move_internal` 会以 threat 视角算 path
+  并写 `bot.curPath`）。
+
+两者要分别修，不能合并成一个假设。
+
+### 四、这一轮的擂台数字（真迷雾 / 官方产兵 / 不钉时钟）
+
+| 对手 | 胜率 | 每步 | 平均回合 | 平均地 |
+| --- | --- | --- | --- | --- |
+| gc | 8-0-0 100% | 180ms | 282.6 | 116.4 : 76.3 |
+| szly | 8-0-0 100% | 230ms | 217.5 | 87.6 : 55.3 |
+| zlyv21 | 7-1-0 87.5% | 197ms | 291.1 | 120.5 : 49.1 |
+| kutu | 4-3-1 50% | 166ms | 428.8 | 108.5 : 64.6 |
+| oim | 5-1-2 62.5% | 126ms | 649.9 | 182.3 : 33.3 |
+
+合计 32-5-3 / 40 = **80.0%**（原版 Human.exe 真口径 32/40 = 80.0%）。
+
+值得注意的形态：**我们每一档的地都比对面多，但局拖得极长**（kutu 429 回合、
+oim 650 回合，地 182:33 还打不死）。说明瓶颈在"把优势换成将军击杀"这一段，
+不在铺地——这和 1.1.x 自制引擎时代量到的"攒不出一拳"是同一个病，只是现在换了实现。
