@@ -1282,7 +1282,10 @@
       if (plan && plan.root_nodes) {
         gatherNodes = plan.root_nodes;
       } else {
-        noteMissing('Gather.gather_max_set_iterative_plan');
+        /* 求解器在、只是这次算出来是空计划（py :1193-1195 同款：gatherNodes 留空数组，
+         * 由 :1236 的 totalValue 闸门决定出不出招）。这不是移植缺口，所以不走 noteMissing ——
+         * 那个计数器是衡量「依赖没接上」的口径，混进业务空结果会让覆盖率永远虚高。 */
+        bot.info('max_set plan with empty root_nodes');
         return [null, -1, -1, null];
       }
     } else {
