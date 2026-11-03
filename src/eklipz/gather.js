@@ -1110,7 +1110,14 @@
     return res[2];
   }
 
-  function prune_mst_to_turns(rootNodes, turns, searchingPlayer, teams, turn) {
+  /* GatherPrune.py:133-175 的签名是
+   * (rootNodes, turns, searchingPlayer, viewInfo=None, noLog=True,
+   *  gatherTreeNodeLookupToPrune=None, tileDictToPrune=None, preferPrune=None,
+   *  allowNegative=True, invalidMoveFunc=None, forcePrunePreferPrune=False)
+   * JS 早先只收了前五位、把 preferPrune 丢了，而 BotGatherOps 的老路分支会传它。
+   * 这里把后半段按名字对上（teams/turn 两个 JS 自造的位保留以不破坏既有调用点）。 */
+  function prune_mst_to_turns(rootNodes, turns, searchingPlayer, teams, turn, viewInfo, noLog,
+    gatherTreeNodeLookupToPrune, tileDictToPrune, preferPrune) {
     var invalidMoveFunc = function (node) {
       if (node.tile.army <= 1) return true;
       return node.tile.player() !== searchingPlayer && node.children.length === 0;
@@ -1126,8 +1133,11 @@
     var pruneOverrideFunc = function (node, prioObj, count, curValue) {
       return count - node.gatherTurns < overpruneCutoff;
     };
+    void teams; void turn;
     var res = prune_mst_until(rootNodes, untilFunc, pruneOrderFunc, invalidMoveFunc, true,
-      pruneOverrideFunc, null, true, null, null, null, null, true, null, null);
+      pruneOverrideFunc, viewInfo || null, noLog === undefined ? true : !!noLog,
+      gatherTreeNodeLookupToPrune || null, tileDictToPrune || null, preferPrune || null, null,
+      true, null, null);
     return res[2];
   }
 

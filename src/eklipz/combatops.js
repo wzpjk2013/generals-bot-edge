@@ -994,30 +994,10 @@
         for (var li = 0; li < leaves.length; li++) gathNeg.add(leaves[li].tile);
       }
 
-      // 原版 py BotModules/BotCombatOps.py:614-630 在此调 Gather.gather_approximate_turns_to_tiles。
-      // 实现一直在 gatherutils.js（gather.js 末尾补了 EK.Gather 转发别名），此前这里是硬桩，
-      // 导致 get_all_in_move 恒走下面 gathCapPlan === null 的停机分支（全下永远不开火）。
-      var timeLimit = 0.075;
-      if (EK.BotTimings && typeof EK.BotTimings.get_remaining_move_time === 'function') {
-        timeLimit = Math.min(0.075, EK.BotTimings.get_remaining_move_time(bot));
-      }
-      gathCapPlan = EK.Gather.gather_approximate_turns_to_tiles(map, {
-        rootTiles: targets,
-        approximateTargetTurns: hitGeneralInTurns,
-        asPlayer: _player(bot.general),
-        gatherMatrix: null,
-        captureMatrix: null,
-        negativeTiles: gathNeg,
-        skipTiles: null,
-        prioritizeCaptureHighArmyTiles: false,
-        useTrueValueGathered: true,
-        includeGatherPriorityAsEconValues: true,
-        includeCapturePriorityAsEconValues: true,
-        tilesToHalf: citiesToHalf,
-        timeLimit: timeLimit,
-        logDebug: false,
-        viewInfo: bot.info_render_gather_values ? bot.viewInfo : null
-      });
+      // Gather.gather_approximate_turns_to_tiles 未移植（JS 的 gather.js 只有 build_from_root_nodes
+      // 与 pruning）。原版这条 gather 是「全下」的唯一产物，缺了它就无法给出可信的推进路径，
+      // 因此这里直接落到原版 gathCapPlan is None 的分支（停机判断），而不是伪造一棵树。
+      gathCapPlan = null;
     });
 
     if (gathCapPlan === null) {

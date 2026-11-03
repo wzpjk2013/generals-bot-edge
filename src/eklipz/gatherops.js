@@ -1201,11 +1201,9 @@
 
     var gatherNodes = null;
 
-    /* BotGatherOps.py:1147-1148 —— 这段在分支之前，原版一直有；
-     * JS 早先收了 additionalIncrement 却从没用过，等于调用方传的增量被静默吞掉。 */
-    if (additionalIncrement !== 0 && targetArmy > 0) {
-      targetArmy = targetArmy + Math.floor(additionalIncrement * gatherTurns / 2);
-    }
+    /* BotGatherOps.py:1147-1148：additionalIncrement 只在最下面那个 else 分支里生效
+     * （pcst 与 GATHER_SWITCH_POINT 两支都不动 targetArmy）。早期 JS 把它提到分支
+     * 之前，属于多加的乘法项，已挪回 else 内。 */
 
     if (bot.gather_use_pcst && gatherTurns > 0 && targetArmy < 0 && !isDict) {
       /* BotGatherOps.py:1064-1082：Gather.gather_approximate_turns_to_tiles 返回 GatherCapturePlan，
@@ -1216,16 +1214,41 @@
         capPlan = gu(map, targets, gatherTurns, general.player(), null, priorityMatrix, priorityMatrix,
           negativeSet, skipTiles, false, useTrueValueGathered, true, true, !!shouldLog, null);
       }
+      /* BotGatherOps.py:1080-1113：pcst 拿不到 plan 时原版**什么都不做**，直接落到函数末尾
+       * 返回 None；不会退到 build_mst。JS 早先在这里接了 _fallbackGather，等于比原版多出
+       * 一手用 MST 拼出来的招（对拍里体现为"我们出招、py pass"，17%/6% 那个偏差的反面）。 */
       if (capPlan && capPlan.root_nodes) {
         gatherNodes = capPlan.root_nodes;
       } else {
         noteMissing('Gather.gather_approximate_turns_to_tiles');
-        gatherNodes = _fallbackGather(bot, targets, gatherTurns, negativeSet, skipTiles, null, priorityMatrix);
+        return [null, -1, -1, null];
       }
     } else if (gatherTurns > GATHER_SWITCH_POINT) {
+      /* BotGatherOps.py:1114-1145：老路。三处与下面 else 不同 —— 一是 prune 要带
+       * preferPrune，二是出招不受 totalValue 门槛限制，三是 move_half_on_repetition 传 6。 */
       gatherNodes = build_mst(bot, targets, maxTime, gatherTurns - 1, negativeSet);
       if (!gatherNodes || gatherNodes.length === 0) return [null, -1, -1, null];
-      EK.Gather.prune_mst_to_turns(gatherNodes, gatherTurns - 1, general.player(), map.teams, map.turn);
+      gatherNodes = EK.Gather.prune_mst_to_turns(gatherNodes, gatherTurns - 1, general.player(),
+        map.teams, map.turn, null, true, null, null,
+        (bot.expansion_plan && bot.expansion_plan.preferred_tiles) ? bot.expansion_plan.preferred_tiles : null);
+      if (maximizeArmyGatheredPerTurn) {
+        gatherNodes = _pruneToMaxArmyPerTurn(bot, gatherNodes, targetArmy, additionalIncrement,
+          includeGatherTreeNodesThatGatherNegative, minTurnsForMaxArmyGatheredPerTurn);
+      }
+      var oldMove = get_tree_move_default(bot, gatherNodes, leafMoveSelectionValueFunc);
+      var oldValue = 0;
+      var oldTurns = 0;
+      if (gatherNodes) {
+        for (var oi = 0; oi < gatherNodes.length; oi++) {
+          oldValue += gatherNodes[oi].value;
+          oldTurns += gatherNodes[oi].gatherTurns;
+        }
+      }
+      if (oldMove) {
+        bot.gatherNodes = gatherNodes;
+        return [moveHalfOnRepetition(bot, oldMove, 6, 6), oldValue, oldTurns, gatherNodes];
+      }
+      return [null, -1, -1, null];
     } else if (bot.gather_use_max_set && !isDict) {
       /* BotGatherOps.py:1150-1195：Gather.gather_max_set_iterative_plan，两个矩阵由
        * build_gather_capture_pure_value_matrix 现场造（value 版 / army 成本版）。 */
@@ -1250,10 +1273,14 @@
         gatherNodes = plan.root_nodes;
       } else {
         noteMissing('Gather.gather_max_set_iterative_plan');
-        gatherNodes = _fallbackGather(bot, targets, gatherTurns, negativeSet, skipTiles, null, priorityMatrix);
+        return [null, -1, -1, null];
       }
     } else {
       /* BotGatherOps.py:1196-1214：Gather.knapsack_max_gather 直接返回 GatherTreeNode[]。 */
+      /* BotGatherOps.py:1147-1148：additionalIncrement 只在这个 else 分支里叠到 targetArmy 上。 */
+      if (additionalIncrement !== 0 && targetArmy > 0) {
+        targetArmy = targetArmy + Math.floor(additionalIncrement * gatherTurns / 2);
+      }
       var kmg = EK.GatherMaxIterative && EK.GatherMaxIterative.knapsack_max_gather;
       if (typeof kmg === 'function') {
         gatherNodes = kmg(map, targets, gatherTurns, targetArmy,
@@ -1270,7 +1297,7 @@
       }
       if (!gatherNodes || gatherNodes.length === 0) {
         noteMissing('Gather.knapsack_max_gather');
-        gatherNodes = _fallbackGather(bot, targets, gatherTurns, negativeSet, skipTiles, null, priorityMatrix);
+        return [null, -1, -1, null];
       }
     }
 
@@ -1291,6 +1318,8 @@
     if (totalValue > targetArmy - Math.floor(gatherTurns / 2)) {
       var move = get_tree_move_default(bot, gatherNodes, leafMoveSelectionValueFunc);
       if (move) {
+        /* BotGatherOps.py:1239 会先把树挂到 bot.gatherNodes 上（重复检测与后续取招都读它）。 */
+        bot.gatherNodes = gatherNodes;
         return [moveHalfOnRepetition(bot, move, 4, 4), totalValue, turns, gatherNodes];
       }
     }
