@@ -372,6 +372,17 @@ function main() {
       console.error('seed ' + t.seed + ' side ' + t.side + ' 崩了：' + (e && e.stack ? e.stack : e));
     }
     if (r) results.push(r);
+    // Per-game line: aggregated win rates cannot be paired across two runs.
+    // Pairing needs (seed, side) per game, so print it as it happens.
+    if (r) {
+      console.log('[game] opp=' + opponent + ' seed=' + r.seed + ' side=' + r.ekSide + ' '
+        + (r.draw ? 'draw' : (r.win ? 'win' : 'loss'))
+        + ' turns=' + r.turns
+        + ' stepMs=' + (r.turns ? Math.round(r.ekMs / r.turns) : 0)
+        + ' illegal=' + r.illegal + ' err=' + r.ekErrors);
+    } else {
+      console.log('[game] opp=' + opponent + ' seed=' + t.seed + ' side=' + t.side + ' error');
+    }
   }
 
   if (!results.length) {
@@ -405,6 +416,21 @@ function main() {
   if (firstErr) console.log('  首次异常栈：\n' + firstErr.ekFirstStack);
   const missing = results.find((r) => r.missing && Object.keys(r.missing).length);
   if (missing) console.log('  缺失依赖：' + JSON.stringify(missing.missing));
+
+  // Machine-readable per-game table, so a later run can be paired with this one
+  // by (seed, side) without re-deriving anything from the aggregate lines.
+  const perGame = results.map((r) => ({
+    seed: r.seed,
+    side: r.ekSide,
+    result: r.draw ? 'draw' : (r.win ? 'win' : 'loss'),
+    turns: r.turns,
+    stepMs: r.turns ? Math.round(r.ekMs / r.turns) : 0,
+    illegal: r.illegal,
+    err: r.ekErrors,
+    land: [r.ekLand, r.refLand],
+    army: [r.ekArmy, r.refArmy],
+  }));
+  console.log('[perGame] ' + JSON.stringify({ opponent: opponent, solver: process.env.GB_MCF_ORTOOLS ? 'ortools' : 'spfa', games: perGame }));
 }
 
 module.exports = { EkBot: EkBot, playGameEk: playGameEk, loadEK: loadEK };

@@ -1834,7 +1834,8 @@
           useTrueValueGathered: true
         }], null);
       } else {
-        // 求解器缺失才退化；py 没有这条兜底，所以只在依赖真的不在时走
+        // 这座分支只在 port 缺失时可达，py 无对应（1v1 里 earlyRetakeTurns 恒负、needToKillTiles 恒空，
+        // 原版同条件也跳过，见 _research/degrade-audit.md 第六节）
         var erRes = EK.BotGatherOps.get_gather_to_target_tiles(this, needToKillTiles, 0.05,
           actualGatherTurns, defenseCriticalTileSet, -1, true, null, false, false, 0, null, null, null, false, false);
         gatherNodes = erRes[3];

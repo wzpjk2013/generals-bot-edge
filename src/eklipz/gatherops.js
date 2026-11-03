@@ -614,8 +614,11 @@
         false, 0, distancePriorities, priorityMatrix, skipTiles, logStuff, false);
       gatherNodes = res[3];
 
-      var depthValue = -1;
-      var depthTurns = -1;
+      /* BotGatherOps.py:533 一次就绑定了 move/value/turnsUsed/gatherNodes，value 之后要拿去算
+       * minGather（:571 的 value // 3），所以失败时的 -1 也要留住 —— 写死成「未知」会让
+       * max_set 那支的 minGather 恒为 0，等于不剪枝。 */
+      var depthValue = (typeof res[1] === 'number') ? res[1] : -1;
+      var depthTurns = (typeof res[2] === 'number') ? res[2] : -1;
 
       if (!gatherNodes) {
         /* BotGatherOps.py:549-568：gather_to_target_tiles 失败后走
@@ -642,13 +645,18 @@
           }
         } else {
           noteMissing('Gather.knapsack_depth_gather_with_values');
+          /* 这条兜底是 port 缺失时的降级，py 无对应（原版一定调得到 knapsack，不会退化成 build_mst）。 */
           gatherNodes = _fallbackGather(bot, startTiles, depth, negativeTiles, skipTiles, skipFunc, priorityMatrix);
         }
       }
 
       if (gatherNodes && pruneToValuePerTurn) {
-        gatherNodes = pruneFallback(bot, gatherNodes, includeGatherTreeNodesThatGatherNegative,
-          depthValue, includeGatherTreeNodesThatGatherNegative);
+        /* BotGatherOps.py:590-591：剪枝后的 count/value 回写给 turnsUsed/value */
+        var pr = pruneFallback(bot, gatherNodes, includeGatherTreeNodesThatGatherNegative,
+          depthValue, logStuff);
+        depthTurns = pr[0];
+        depthValue = pr[1];
+        gatherNodes = pr[2];
       }
 
       if (gatherNodes) {
@@ -667,32 +675,32 @@
   }
 
   /* BotGatherOps.py:570-591 的 pruneToValuePerTurn 分支。
-   * 原版这里必须知道「gather 一共产出多少价值」才能定 minGather（value//3，守经济时 4*value//5），
-   * 所以调用方要把 knapsack_depth_gather_with_values 的第一个返回值送进来。 */
-  function pruneFallback(bot, gatherNodes, includeNegative, gatheredValue, allowNegative) {
-    if (!gatherNodes) return gatherNodes;
+   * minGather 由「这次 gather 一共产出多少价值」决定（value // 3，守经济时 4*value // 5），
+   * 所以调用方必须把 gather 的 value 送进来。
+   * 返回 [prunedCount, prunedValue, gatherNodes]：py :590-591 把前两位回写给 turnsUsed/value。
+   * py :576-579 那个装满 army<=1 自有格的 prefer 集合构造完就再没传过（死代码），这里不实现。 */
+  function pruneFallback(bot, gatherNodes, includeNegative, gatheredValue, logStuff) {
+    if (!gatherNodes) return [-1, -1, gatherNodes];
     var prune = EK.GatherPrune && EK.GatherPrune.prune_mst_to_max_army_per_turn_with_values;
     if (typeof prune !== 'function') {
       noteMissing('Gather.prune_mst_to_max_army_per_turn_with_values');
-      return gatherNodes;
+      return [-1, -1, gatherNodes];
     }
     var map = mapOf(bot);
     var general = generalOf(bot);
-    var value = (typeof gatheredValue === 'number' && gatheredValue > 0) ? gatheredValue : 0;
-    var minGather = Math.floor(value / 4);
+    var value = (typeof gatheredValue === 'number') ? gatheredValue : -1;
+    var minGather = Math.floor(value / 3);
     if (bot.defend_economy) minGather = Math.floor(4 * value / 5);
-    /* preferPrune：py 把所有兵<=1 的自有格塞进 set，让剪枝优先砍这些「没兵的空壳」 */
-    var prefer = new Set();
-    var myTiles = map.players[general.player()] ? map.players[general.player()].tiles : [];
-    for (var i = 0; i < myTiles.length; i++) {
-      if (myTiles[i].army <= 1) prefer.add(myTiles[i]);
-    }
-    var allowNeg = allowNegative === undefined ? includeNegative : allowNegative;
-    /* get_teams_array 是 Map 上的静态方法（src/eklipz/map.js:1046），实例上没有 */
+    /* 位置实参 ↔ py 关键字（BotGatherOps.py:580-589 对 gatherprune.js:650-654 的形参表，逐位相同）：
+     *   gatherNodes, minArmy=minGather, searchingPlayer, teams=MapBase.get_teams_array(map),
+     *   additionalIncrement=0, viewInfo(无渲染=null), noLog=!logStuff,
+     *   gatherTreeNodeLookupToPrune=null, invalidMoveFunc=null,
+     *   preferPrune=null（py 这一支没传）, allowNegative=includeGatherTreeNodesThatGatherNegative,
+     *   allowBranchPrune=true, minTurns=0 */
     var res = prune(gatherNodes, minGather, general.player(), EK.Map.get_teams_array(map),
-      0, null, true, null, null, prefer, !!allowNeg, true, 0);
-    if (!res) return gatherNodes;
-    return res[2];
+      0, null, !logStuff, null, null, null, !!includeNegative, true, 0);
+    if (!res) return [-1, -1, gatherNodes];
+    return [res[0], res[1], res[2]];
   }
 
   // 缺失原语时的统一退化：本文件的 build_mst 已按 Python 语义实现，直接拿来用。
@@ -1246,7 +1254,9 @@
       }
       if (oldMove) {
         bot.gatherNodes = gatherNodes;
-        return [moveHalfOnRepetition(bot, oldMove, 6, 6), oldValue, oldTurns, gatherNodes];
+        /* BotGatherOps.py:1145 只传了 repetitionTurns=6，repCount 用默认 3；
+         * 早先这里传了 (6, 6) 相当于要求重复 6 次才判半兵，比原版更晚才 half。 */
+        return [moveHalfOnRepetition(bot, oldMove, 6), oldValue, oldTurns, gatherNodes];
       }
       return [null, -1, -1, null];
     } else if (bot.gather_use_max_set && !isDict) {
@@ -1333,14 +1343,36 @@
     maximizeArmyGatheredPerTurn, shouldLog) {
     if (useTrueValueGathered === undefined) useTrueValueGathered = false;
     if (targetArmy === undefined) targetArmy = -1;
+    if (includeGatherTreeNodesThatGatherNegative === undefined) includeGatherTreeNodesThatGatherNegative = false;
 
-    noteMissing('Gather.greedy_backpack_gather');
-    var gatherNodes = _fallbackGather(bot, targets, gatherTurns, negativeSet, null, null, null);
+    /* 求解器真身在 EK.GatherUtils（本仓 gatherutils.js:672，gm1/g3000 对拍 0 差异）。
+     * 旧代码按 'Gather.greedy_backpack_gather' 取，那个名字根本不存在，于是每次退化成
+     * 本文件 _fallbackGather 的 MST 拼树 —— 原版没有这招，宁可返回空也不自造。 */
+    var greedy = EK.GatherUtils && EK.GatherUtils.greedy_backpack_gather;
+    if (typeof greedy !== 'function') {
+      noteMissing('GatherUtils.greedy_backpack_gather');
+      return [null, -1, -1, null];
+    }
+
+    var map = mapOf(bot);
+    var general = generalOf(bot);
+    /* py :1262 的 kwargs ↔ gatherutils.js:672 的形参。priorityFunc 原版压根没往下传，只在出招时用
+     * valueFunc；maxTime 这一支原版也不用（贪心求解没有 cutoff，签名保留是为了和 py 保持位置一致）。 */
+    var gatherNodes = greedy(map, targets, gatherTurns, targetArmy,
+      null, null,                                       // valueFunc, baseCaseFunc
+      negativeSet, null, general.player(),              // negativeTiles, skipTiles, searchingPlayer
+      null, null, null,                                 // priorityFunc, skipFunc, priorityTiles
+      false, false, false,                              // ignoreStartTile, incrementBackward, preferNeutral
+      null, null,                                       // viewInfo（无渲染）, distPriorityMap
+      useTrueValueGathered, includeGatherTreeNodesThatGatherNegative, !!shouldLog);
 
     if (!gatherNodes || gatherNodes.length === 0) return [null, -1, -1, null];
 
     if (maximizeArmyGatheredPerTurn) {
-      gatherNodes = pruneFallback(bot, gatherNodes, includeGatherTreeNodesThatGatherNegative);
+      /* py :1274-1281：minArmy 用 targetArmy、preferPrune 用 expansion_plan.preferred_tiles、
+       * 无 additionalIncrement/minTurns —— 与 pruneFallback 那支不同，复用 _pruneToMaxArmyPerTurn。 */
+      gatherNodes = _pruneToMaxArmyPerTurn(bot, gatherNodes, targetArmy, 0,
+        includeGatherTreeNodesThatGatherNegative, 0) || gatherNodes;
     }
 
     var totalValue = 0;
@@ -1350,9 +1382,13 @@
       turns += gatherNodes[i].gatherTurns;
     }
 
+    /* py :1292 是 totalValue > targetArmy，不减 gatherTurns // 2（那是 max_set 那支的写法）。 */
     if (totalValue > targetArmy) {
       var move = get_tree_move_default(bot, gatherNodes, valueFunc);
-      if (move) return [moveHalfOnRepetition(bot, move, 4, 4), totalValue, turns, gatherNodes];
+      if (move) {
+        bot.gatherNodes = gatherNodes;   // py :1295
+        return [moveHalfOnRepetition(bot, move, 4, 4), totalValue, turns, gatherNodes];
+      }
     }
     return [null, -1, -1, null];
   }
