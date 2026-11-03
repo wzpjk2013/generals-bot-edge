@@ -314,6 +314,14 @@ function wrapLayers(ek) {
       for (const k of sol.keys()) keys.push(pairCanon(this, k));
     }
     dbg.solution = keys;
+    // 分组背包的入参：external option 有没有进背包、分组号是多少，决定它能不能被选中。
+    dbg.knap_input = {
+      tables: (lookupTables || []).length,
+      enriched: (lookupTables || []).reduce((n, t) => n + ((t.enriched_capture_entries || []).length), 0),
+      external: (externalOptions || []).length,
+      externalRows: (externalOptions || []).map((e) => [e.group_id, e.turns, e.econ_value,
+        (e.tile_set && e.tile_set.size !== undefined) ? e.tile_set.size : null])
+    };
     return sol;
   };
 }
@@ -629,6 +637,8 @@ function main() {
         lookups: global.__FEDBG.lookups || [],
         ctrails: global.__FEDBG.ctrails || [],
         edges: global.__FEDBG.edges || [],
+        solution: global.__FEDBG.solution || [],
+        knap_input: global.__FEDBG.knap_input || null,
         solves: global.__FESOLVES || [],
         mapTiles: global.__FEDBG.mapTiles || null,
       },
