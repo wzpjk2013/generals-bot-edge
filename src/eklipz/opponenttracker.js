@@ -502,6 +502,36 @@
     return arr[k >= 0 ? k : arr.length - 1];
   }
 
+  /* 同上，但整张表一次性套上：只拦 '-N' 形式的字符串键，读写都折成 len + n。
+   * 正下标 / length / 方法调用全部原样走，正常路径零影响。 */
+  function pyArray(arr) {
+    if (typeof Proxy !== 'function' || arr === null || arr === undefined) return arr;
+    return new Proxy(arr, {
+      get: function (target, prop, recv) {
+        if (typeof prop === 'string' && prop.length > 1 && prop.charAt(0) === '-') {
+          var n = Number(prop);
+          if (!isNaN(n)) {
+            var k = target.length + n;
+            return target[k >= 0 ? k : target.length - 1];
+          }
+        }
+        return Reflect.get(target, prop, recv);
+      },
+      set: function (target, prop, value) {
+        if (typeof prop === 'string' && prop.length > 1 && prop.charAt(0) === '-') {
+          var n2 = Number(prop);
+          if (!isNaN(n2)) {
+            var k2 = target.length + n2;
+            target[k2 >= 0 ? k2 : target.length - 1] = value;
+            return true;
+          }
+        }
+        target[prop] = value;
+        return true;
+      }
+    });
+  }
+
   function OpponentTracker(map, viewInfo) {
     this.outbound_emergence_notifications = [];
     this.map = map;
@@ -551,6 +581,13 @@
       this.current_largest_unresolved_emergence_by_player.push(null);
       this.largest_unresolved_emergence_history_by_player.push({});
     }
+    // 这五张表都按玩家号索引，而 bot.targetPlayer / tile.player() 可能是 -1；
+    // py 的 list[-1] 取末元素，套上代理保住这个语义。
+    this.assumed_player_average_tile_values = pyArray(this.assumed_player_average_tile_values);
+    this.last_player_move_type = pyArray(this.last_player_move_type);
+    this._gather_queues_new_by_player = pyArray(this._gather_queues_new_by_player);
+    this.current_largest_unresolved_emergence_by_player = pyArray(this.current_largest_unresolved_emergence_by_player);
+    this.largest_unresolved_emergence_history_by_player = pyArray(this.largest_unresolved_emergence_history_by_player);
     this.approximate_per_city_gather_distance = 6.0;
     this._revealed = new Set();
     this._moves_into_fog = [];
