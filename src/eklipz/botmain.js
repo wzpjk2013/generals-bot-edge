@@ -1583,7 +1583,12 @@
         && this.expansion_plan.selected_option.start
         && this.expansion_plan.selected_option.start.tile === kingKillPath.start.tile;
       var attackingWithRestrictedArmyMovement = false;
-      var blocks = this.blocking_tile_info[kingKillPath.start.tile.tile_index];
+      // py `self.blocking_tile_info.get(kingKillPath.start.tile)`（bot_ek0x45.py:1255）——
+      // 这张表以 **Tile 为键**（defense.js:1195 `new Map()`、:2335 `blocking.get(defensiveTile)`）。
+      // 早先按 tile_index 下标取，恒 undefined ⇒ 这个守卫永远是 false，兵力受限的抢将招被放行。
+      var blocks = this.blocking_tile_info instanceof Map
+        ? this.blocking_tile_info.get(kingKillPath.start.tile)
+        : this.blocking_tile_info[kingKillPath.start.tile.tile_index];
       if (blocks && blocks.blocked_destinations && blocks.blocked_destinations.indexOf(kingKillPath.start.next.tile) >= 0) {
         attackingWithRestrictedArmyMovement = true;
       }

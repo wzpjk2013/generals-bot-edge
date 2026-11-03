@@ -497,18 +497,20 @@
           var cutoffEmergence = 0.4;
           var otForRisk = _ot(bot);
           if (threatIsGeneralKill) {
+            // get_approximate_fog_army_risk 是位置参数 (player, cityLimit, inTurns)，
+            // 早先这里传了 opts 对象 ⇒ cityLimit 变对象 ⇒ Math.min(对象, n) = NaN ⇒
+            // 整条 fog risk 变 NaN ⇒ `quickKill.value > cutoffKillArmy` 恒 false。
+            // py BotCombatOps.py:193/198/349/358 全是关键字调用。
             cutoffKillArmy = otForRisk
-              ? otForRisk.get_approximate_fog_army_risk(enPlayer, { cityLimit: null, inTurns: 0 })
+              ? otForRisk.get_approximate_fog_army_risk(enPlayer, null, 0)
               : 0;
             if (enemyGeneral.isGeneral) {
               cutoffKillArmy -= enemyGeneral.army + Math.floor(quickKill.length / 2);
             }
             cutoffEmergence = 0.15;
           } else if (otForRisk) {
-            cutoffKillArmy = otForRisk.get_approximate_fog_army_risk(enPlayer, {
-              cityLimit: null,
-              inTurns: maxEnDefTurns - 3
-            }) + 2 * additionalKillDist - 5;
+            cutoffKillArmy = otForRisk.get_approximate_fog_army_risk(enPlayer, null, maxEnDefTurns - 3)
+              + 2 * additionalKillDist - 5;
           } else {
             cutoffKillArmy = 2 * additionalKillDist - 5;
           }
@@ -745,10 +747,7 @@
       additionalKillArmyRequirement = 0;
       var ot = _ot(bot);
       if (!enemyGeneral.isGeneral && ot) {
-        additionalKillArmyRequirement = ot.get_approximate_fog_army_risk(ctx.enPlayer, {
-          cityLimit: null,
-          inTurns: 0
-        });
+        additionalKillArmyRequirement = ot.get_approximate_fog_army_risk(ctx.enPlayer, null, 0);
       }
       additionalKillArmyRequirement = Math.max(0, additionalKillArmyRequirement);
 
@@ -760,10 +759,7 @@
         rangeBasedOnDistance = Math.floor(
           EK.BotPathingUtils.distance_from_general(bot, bot.targetPlayerExpectedGeneralLocation) / 4 - 1);
 
-        additionalKillArmyRequirement = ot.get_approximate_fog_army_risk(ctx.enPlayer, {
-          cityLimit: null,
-          inTurns: 3
-        });
+        additionalKillArmyRequirement = ot.get_approximate_fog_army_risk(ctx.enPlayer, null, 3);
       }
 
       var depth = Math.max(5 === 5 ? (bot.is_all_in_losing && !bot.all_in_city_behind ? 7 : 5) : 5,
@@ -2127,10 +2123,48 @@
           }
         }
 
-        // Gather.gather_approximate_turns_to_tiles 未移植 → 无法生成 gcp（见 get_all_in_move 同注释）。
-        // 原版 gcp is None 时同样 return None，所以这里保持 None。
+        // py BotCombatOps.py:2197-2215：这里真的去要一个 GatherCapturePlan。
+        // 目标路径是「敌将可能位置前 4 + 敌城（非全下时）+ 敌方来路近侧格」，
+        // 并带 gatherMatrix / negativeTiles / useTrueValueGathered 等关键字参数。
+        var moveClosestValueFunc = null;
+        var enAttackPathForPrio = (typeof enAttackPath !== 'undefined') ? enAttackPath : null;
+        if (!_isNone(enAttackPathForPrio)) {
+          var enAnalysis = EK.ArmyAnalyzer.build_from_path(map, enAttackPathForPrio);
+          var fakeThreat = _threatObj(enAttackPathForPrio.length, 1, enAttackPathForPrio,
+            EK.ThreatType.Vision, null, enAnalysis);
+          if (EK.BotDefense && typeof EK.BotDefense.get_defense_tree_move_prio_func === 'function') {
+            moveClosestValueFunc = EK.BotDefense.get_defense_tree_move_prio_func(bot, fakeThreat);
+          }
+        }
+
+        var gatherMatrix = null;
+        if (EK.BotGatherOps && typeof EK.BotGatherOps.get_gather_tiebreak_matrix === 'function') {
+          gatherMatrix = EK.BotGatherOps.get_gather_tiebreak_matrix(bot);
+        }
+        var remainingMoveTime = EK.BotTimings && typeof EK.BotTimings.get_remaining_move_time === 'function'
+          ? EK.BotTimings.get_remaining_move_time(bot)
+          : 0.05;
         var gcp = null;
+        if (EK.GatherUtils && typeof EK.GatherUtils.gather_approximate_turns_to_tiles === 'function') {
+          // 键名照 py BotCombatOps.py:2204-2215 的关键字参数，逐个对上。
+          gcp = EK.GatherUtils.gather_approximate_turns_to_tiles(map, {
+            rootTiles: targets,
+            approximateTargetTurns: remainingTurns,
+            asPlayer: bot.player.index,
+            gatherMatrix: gatherMatrix,
+            negativeTiles: negatives,
+            prioritizeCaptureHighArmyTiles: !bot.is_all_in_losing,
+            useTrueValueGathered: true,
+            includeGatherPriorityAsEconValues: false,
+            includeCapturePriorityAsEconValues: false,
+            logDebug: false,
+            timeLimit: Math.min(0.05, remainingMoveTime)
+          });
+        } else if (bot && typeof bot._noteMissing === 'function') {
+          bot._noteMissing('Gather.gather_approximate_turns_to_tiles');
+        }
         if (!_isNone(gcp)) {
+          if (moveClosestValueFunc !== null) gcp.value_func = moveClosestValueFunc;
           return gcp.get_first_move();
         }
       }
