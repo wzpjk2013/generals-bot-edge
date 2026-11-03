@@ -131,7 +131,13 @@
     }
 
     var allInPath = BotKillTiming._get_all_in_path(bot);
-    if (allInPath !== null && allInPath !== undefined && allInPath.length <= map.remainingCycleTurns) {
+    // 原版永远走不到这一段：wincondition.js 里 BotKillTiming 的取法修对之后，
+    // projected_loss_all_in_active 才会真开，而它只在换目标玩家时清零（botmain.js:2272），
+    // 一旦为真就锁整局。这段 fallback 于是每 5~6 回合从将军格（兵恒 1）出一次非法招。
+    // 原版从不执行此处，所以守卫口径由我们定：起点兵不足就是无招可出，交给下游 pass。
+    var allInStartArmy = allInPath && allInPath.start && allInPath.start.tile ? allInPath.start.tile.army : 0;
+    if (allInPath !== null && allInPath !== undefined && allInStartArmy > 1
+      && allInPath.length <= map.remainingCycleTurns) {
       var fallbackMove = allInPath.get_first_move();
       var fbRepeat = fallbackMove !== null && fallbackMove !== undefined && repetition && typeof repetition.detect_repetition === 'function'
         ? repetition.detect_repetition(bot, fallbackMove)

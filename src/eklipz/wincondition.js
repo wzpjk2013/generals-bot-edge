@@ -1216,6 +1216,10 @@
     return this.opponent_tracker.winning_on_economy(1.04, undefined, undefined, -10);
   };
 
+  // 全下（KillAllIn）默认关闭，理由见 force_kill_all_in_if_projected_round_loss 里那段注释：
+  // 原版这支必然 AttributeError，旗子从不为真。想研究/打开用 GB_EK_ALL_IN=1。
+  WCA.__ALL_IN_ENABLED = (typeof process !== 'undefined' && process.env && process.env.GB_EK_ALL_IN === '1');
+
   WCA.force_kill_all_in_if_projected_round_loss = function (bot, expansionPlan, enemyExpansionPlan,
     economyRatioRequired, armyRatioRequired, minimumEconomyGap) {
     if (isNone(economyRatioRequired)) economyRatioRequired = 0.90;
@@ -1246,6 +1250,15 @@
     var armyLost = ourProjectedArmy < enemyProjectedArmy * armyRatioRequired;
 
     if (!economyLost || !armyLost) return false;
+
+    // 到这里原版会执行 `BM.BotKillTiming.BotKillTiming.find_all_in_option(bot)`，
+    // 而 py 里 `BM.BotKillTiming` 是 **类**（实测 type(BM.BotKillTiming) == type、
+    // hasattr(...,'BotKillTiming') == False），这一行必然 AttributeError，
+    // 被 make_move(rethrow=False) 吞成「本回合不出招」。
+    // ⇒ 原版的可观测行为是：projected_loss_all_in_active 永远为 False，全下链从不生效。
+    // 我们不重演「白丢一回合」，但必须保持同一个可观测状态：这里直接返回 False。
+    // 实测代价：把这段接通（提交 7708bf2）后 gc 8 局从 87.5% 掉到 37.5~62.5%。
+    if (!WCA.__ALL_IN_ENABLED) return false;
 
     // 原版 py Strategy/WinConditionAnalyzer.py:647 写的是
     //   self.all_in_plan = BM.BotKillTiming.BotKillTiming.find_all_in_option(bot)
