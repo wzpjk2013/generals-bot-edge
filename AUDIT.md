@@ -600,3 +600,41 @@ T40 / T41 / T48 / T49 四条规则全落空 ⇒ 平局选择不是数组内容�
 T50：option 数 82 与 py 相同、平局选择已强制成 py 的 `[10,69]`，js 仍走 `18,4>18,5` 而 py 走 `18,4>17,4`。
 ⇒ 差异在背包之后的招法选择段，不在 flow / lookups / knapsack 三层（这三层在当前配置下已 100% 相等）。
 
+### 七、T50 的定性：不是缺口，是「搜索深度对墙钟敏感」
+
+同层探针（py `_research/ekdump_select.py` / js `_research/t50-select.js`）录「扩张 plan 是否有选中项 +
+选中项 first_move + 最终出招」，结果：
+
+- py：`T50 hasSel=true selFm=[97,98] turnsUsed=23`，`T51 hasSel=false`——**dump 里 py 的 T50 招
+  `18,4>17,4` 就出自 T51 那次迭代，而那一回合 `expansion_plan.selected_option` 是空的**；
+- js：`T50 selFm=null chosen=[98,97]`，与 py 一致。
+
+即这回合的招**根本不由扩张 plan 出，是 `timing_gather` 出的**。而 `timing_gather` 的搜索深度吃
+`_get_remaining_move_time()`（真实墙钟）⇒ 同一份 dump、同一份代码，机器负载一变，招就变
+（负载轻时出 `[98,97]`＝与 py 一致，负载重时出 `[98,118]`＝`18,4>18,5`）。
+
+**据此定案三条：**
+
+1. `GB_EK_DET=1`（钉死 `EK.clock`）的用途**只有一**：验「同一份代码跑两次是否同结果」。
+   用在和 py dump 的决策对拍上是**错仪器**——实测一致率从 98.04% 掉到 63.03%，因为 py 的 dump 是
+   真实墙钟跑出来的，它的 pass 来自"预算耗尽"，而我们冻结时钟后永远"还有时间"，语义不对等。
+   典型症状：py pass / js 连出十几回合同一招（T83–T90 全是 `17,5>16,5`）。
+2. 与 py dump 的决策对拍必须在**同一时间语义**下做（真实墙钟 + 近似同负载）。因此
+   **`ekdiff-move` 的理论天花板是 50/51 上下摆动，不是 51/51**。
+3. M4「逐招一致」按**可观测层面等价**结项：flowopts 11/11、map 51/51、背包入参/结果 11/11、
+   弧级 2473/2473；不可复刻的只剩两处——**等值不等解的 CP-SAT 平局**与**时间预算敏感的搜索深度**。
+
+### 八、顺带推翻的两条成见（都会影响以后的做法）
+
+- **`EK.clock` 接线早已铺开**：13 个文件都有 `function clockNowMs(){return EK.clock?EK.clock.nowMs():Date.now()}`
+  这套本地包装，`search.js` 的 deadline、`gathermax.js:534` 的 `cutoffTime`、`gatherops.js` 的
+  `_get_remaining_move_time` 全走 clock。`earlyexpandutils.js:1440` 的 `return Date.now()/1000;`
+  **不是漏点**——它上一行 `if (EK.clock && EK.clock.isFixed()) return clockNowSec();` 已经拦住了，
+  最后那行只是"未固定时用真实时钟"的兜底。别再去改它。
+- **knapsack 的估算系数必须抄 C++ 那一支**：原版线上跑的是 C++ 扩展
+  （`KnapsackUtilsCpp.cpp:46` 系数 `4e-8`），而 `GB_PURE_PY_KNAPSACK=1` 的 purepy 是 `2.2e-7`
+  （阈值同为 `0.005`）⇒ 照 purepy 抄会让 JS **比真机早 5.5 倍**抛
+  `Knapsack potential long run est …`，临床表现是"整回合不出招"。JS 侧按 `4e-8` 对齐，
+  py oracle 侧也要把系数 patch 成同一值，否则对拍会出现"py 抛 / js 不抛"的假差异。
+  —— 这条是「oracle 与被测侧必须同一阈值」的一个实例，和「同一时间语义」是一类错误。
+
