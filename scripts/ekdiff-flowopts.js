@@ -737,6 +737,19 @@ function main() {
       },
       pyPlans: (pyPlans || []).map(function (p) { return p.type + ':' + p.length; }),
       jsPlans: jsPlans.map(planSnapshot).map(function (p) { return p.type + ':' + p.length; }),
+      pyPlanDetail: (pyPlans || []).map(function (p) {
+        return { type: p.type, econValue: p.econValue, length: p.length, tiles: p.tiles };
+      }),
+      jsPlanDetail: jsPlans.map(function (p) {
+        const s = planSnapshot(p);
+        let first = null;
+        try {
+          const fm = p.get_first_move ? p.get_first_move() : null;
+          if (fm) first = [fm.source.tile_index, fm.dest.tile_index];
+        } catch (e) { first = 'ERR'; }
+        s.firstMove = first;
+        return s;
+      }),
     });
     notes.length = 0;
     if (planDiffs.length || layerDiffs.length || genDiff.length) {

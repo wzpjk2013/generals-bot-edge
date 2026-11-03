@@ -420,15 +420,17 @@
   function ortoolsMaxFlowValue(nodeCount, tails, heads, caps, source, sink) {
     if (nodeCount <= 0 || source === sink) return 0;
     var m = tails.length;
-    var adjHead = [];
-    var adjNext = [];
-    var adjCap = [];
+    var e2 = m * 2;
+    // 平行数组而不是 push 对象：这张 Dinic 在图大的回合是全步最贵的几段之一
+    var adjHead = new Int32Array(e2);
+    var adjNext = new Int32Array(e2);
+    var adjCap = new Int32Array(e2);
     var adj = new Int32Array(nodeCount);
     for (var z = 0; z < nodeCount; z++) adj[z] = -1;
     for (var a = 0; a < m; a++) {
-      var e = adjHead.length;
-      adjHead.push(heads[a]); adjCap.push(caps[a]); adjNext.push(adj[tails[a]]); adj[tails[a]] = e;
-      adjHead.push(tails[a]); adjCap.push(0); adjNext.push(adj[heads[a]]); adj[heads[a]] = e + 1;
+      var e = a * 2;
+      adjHead[e] = heads[a]; adjCap[e] = caps[a]; adjNext[e] = adj[tails[a]]; adj[tails[a]] = e;
+      adjHead[e + 1] = tails[a]; adjCap[e + 1] = 0; adjNext[e + 1] = adj[heads[a]]; adj[heads[a]] = e + 1;
     }
     var level = new Int32Array(nodeCount);
     var iter = new Int32Array(nodeCount);
@@ -441,16 +443,19 @@
       queue[qt++] = source;
       while (qh < qt) {
         var u = queue[qh++];
-        for (var e2 = adj[u]; e2 !== -1; e2 = adjNext[e2]) {
-          if (adjCap[e2] > 0 && level[adjHead[e2]] < 0) {
-            level[adjHead[e2]] = level[u] + 1;
-            queue[qt++] = adjHead[e2];
+        var lu = level[u] + 1;
+        for (var e3 = adj[u]; e3 !== -1; e3 = adjNext[e3]) {
+          var hv = adjHead[e3];
+          if (adjCap[e3] > 0 && level[hv] < 0) {
+            level[hv] = lu;
+            queue[qt++] = hv;
           }
         }
       }
       return level[sink] >= 0;
     }
 
+    var sinkLevel = 0;
     function dfs(u, pushed) {
       if (u === sink) return pushed;
       while (iter[u] !== -1) {
@@ -471,9 +476,10 @@
 
     var flow = 0;
     while (bfs()) {
+      sinkLevel = level[sink];
       for (var i2 = 0; i2 < nodeCount; i2++) iter[i2] = adj[i2];
       var f;
-      while ((f = dfs(source, Infinity)) > 0) flow += f;
+      while ((f = dfs(source, 1073741824)) > 0) flow += f;
     }
     return flow;
   }
@@ -578,17 +584,18 @@
     var M = aTail.length;
 
     // -- Graph::Build：按 tail 稳定计数排序，perm[old] = new
-    var bucket = new Array(augNodes + 1);
-    for (var b0 = 0; b0 <= augNodes; b0++) bucket[b0] = 0;
+    // bucket/cursor/perm 都走 Int32Array：M 是弧数（大回合 2480+），每回合都重建
+    var bucket = new Int32Array(augNodes + 1);
     for (var b1 = 0; b1 < M; b1++) bucket[aTail[b1] + 1]++;
     for (var b2 = 1; b2 <= augNodes; b2++) bucket[b2] += bucket[b2 - 1];
-    var cursor = bucket.slice(0, augNodes);
-    var perm = new Array(M);
+    var cursor = new Int32Array(augNodes);
+    for (var c0 = 0; c0 < augNodes; c0++) cursor[c0] = bucket[c0];
+    var perm = new Int32Array(M);
     for (var b3 = 0; b3 < M; b3++) perm[b3] = cursor[aTail[b3]]++;
-    var tail2 = new Array(M);
-    var head2 = new Array(M);
-    var cap2 = new Array(M);
-    var cost2 = new Array(M);
+    var tail2 = new Int32Array(M);
+    var head2 = new Int32Array(M);
+    var cap2 = new Int32Array(M);
+    var cost2 = new Int32Array(M);
     for (var b4 = 0; b4 < M; b4++) {
       var p4 = perm[b4];
       tail2[p4] = aTail[b4];
@@ -626,33 +633,48 @@
     }
 
     // -- 每节点弧序：反向弧（按正向 index 升序）+ 正向出弧（新 index 升序）
-    var inArcs = [];
-    var outArcs = [];
-    for (var v0 = 0; v0 < augNodes; v0++) {
-      inArcs.push([]);
-      outArcs.push([]);
-    }
-    for (var v1 = 0; v1 < M; v1++) {
-      outArcs[tail2[v1]].push(v1);
-      inArcs[head2[v1]].push(v1);
-    }
+    // 两遍构建直接写进 Int32Array，不再每个节点开两个小数组（2480 弧 × 每回合）
     var seqOff = new Int32Array(augNodes);
     var seqLen = new Int32Array(augNodes);
-    var seqArr = [];
-    for (var v2 = 0; v2 < augNodes; v2++) {
-      seqOff[v2] = seqArr.length;
-      var inc = inArcs[v2];
-      var outg = outArcs[v2];
-      for (var i2 = 0; i2 < inc.length; i2++) seqArr.push(-inc[i2] - 1); // 反向弧编码 = ~f
-      for (var o2 = 0; o2 < outg.length; o2++) seqArr.push(outg[o2]);
-      seqLen[v2] = inc.length + outg.length;
+    var fillIn = new Int32Array(augNodes);
+    var fillOut = new Int32Array(augNodes);
+    for (var v1 = 0; v1 < M; v1++) {
+      fillOut[tail2[v1]]++;
+      fillIn[head2[v1]]++;
     }
-    var seq = Int32Array.from(seqArr);
+    var acc = 0;
+    for (var v2 = 0; v2 < augNodes; v2++) {
+      seqOff[v2] = acc;
+      seqLen[v2] = fillIn[v2] + fillOut[v2];
+      acc += seqLen[v2];
+    }
+    var seq = new Int32Array(acc);
+    for (var v3 = 0; v3 < augNodes; v3++) fillOut[v3] = seqOff[v3] + fillIn[v3];
+    for (var v4 = 0; v4 < augNodes; v4++) fillIn[v4] = seqOff[v4];
+    for (var v5 = 0; v5 < M; v5++) {
+      seq[fillIn[head2[v5]]++] = -v5 - 1; // 反向弧编码 = ~f
+      seq[fillOut[tail2[v5]]++] = v5;
+    }
     var firstAdm = new Int32Array(augNodes); // 相对位置；== seqLen 即 kNilArc
 
-    function arcHead(enc) { return enc >= 0 ? head2[enc] : tail2[-enc - 1]; }
-    function arcCost(enc) { return enc >= 0 ? scost[enc] : -scost[-enc - 1]; }
-    function arcRes(enc) { return enc >= 0 ? resF[enc] : resR[-enc - 1]; }
+    // 热点循环里不再走函数调用：下面这些是内联副本，语义与 C++ 一一对应
+    function arcHeadAt(enc) { return enc >= 0 ? head2[enc] : tail2[-enc - 1]; }
+    function arcCostAt(enc) { return enc >= 0 ? scost[enc] : -scost[-enc - 1]; }
+    function arcResAt(enc) { return enc >= 0 ? resF[enc] : resR[-enc - 1]; }
+
+    // 活跃栈：预分配 Int32Array + 栈顶指针（std::stack 的 LIFO 语义不变）
+    var stackCap = augNodes + 8;
+    var stackBuf = new Int32Array(stackCap);
+    var stackTop = 0;
+    function pushStack(v) {
+      if (stackTop === stackCap) {
+        stackCap *= 2;
+        var nb = new Int32Array(stackCap);
+        nb.set(stackBuf);
+        stackBuf = nb;
+      }
+      stackBuf[stackTop++] = v;
+    }
 
     function pushFlow(amount, enc, tailNode) {
       if (enc >= 0) {
@@ -664,11 +686,11 @@
         resF[f] += amount;
       }
       excess[tailNode] -= amount;
-      excess[arcHead(enc)] += amount;
+      excess[arcHeadAt(enc)] += amount;
     }
 
     function isAdmissible(enc, tailPotential) {
-      return arcRes(enc) > 0 && arcCost(enc) + tailPotential - pot[arcHead(enc)] < 0;
+      return arcResAt(enc) > 0 && arcCostAt(enc) + tailPotential - pot[arcHeadAt(enc)] < 0;
     }
 
     var numRelabels = 0;
@@ -676,9 +698,13 @@
     function nodeHasAdmissibleArc(node) {
       var tp = pot[node];
       var off = seqOff[node];
-      for (var p = firstAdm[node]; p < seqLen[node]; p++) {
+      var len = seqLen[node];
+      for (var p = firstAdm[node]; p < len; p++) {
         var enc = seq[off + p];
-        if (isAdmissible(enc, tp)) {
+        var res, head, cost;
+        if (enc >= 0) { res = resF[enc]; head = head2[enc]; cost = scost[enc]; }
+        else { var nf = -enc - 1; res = resR[nf]; head = tail2[nf]; cost = -scost[nf]; }
+        if (res > 0 && cost + tp - pot[head] < 0) {
           firstAdm[node] = p;
           return true;
         }
@@ -697,8 +723,11 @@
       var len = seqLen[node];
       for (var p = 0; p < len; p++) {
         var enc = seq[off + p];
-        if (!(arcRes(enc) > 0)) continue;
-        var m = pot[arcHead(enc)] - arcCost(enc);
+        var res, head, cost;
+        if (enc >= 0) { res = resF[enc]; head = head2[enc]; cost = scost[enc]; }
+        else { var nf = -enc - 1; res = resR[nf]; head = tail2[nf]; cost = -scost[nf]; }
+        if (res <= 0) continue;
+        var m = pot[head] - cost;
         if (m > guaranteed) {
           pot[node] = guaranteed;
           firstAdm[node] = p;
@@ -725,24 +754,39 @@
       return true;
     }
 
-    function discharge(node, stack) {
+    function discharge(node) {
       var off = seqOff[node];
       var len = seqLen[node];
       while (true) {
         var tailPotential = pot[node];
         for (var p = firstAdm[node]; p < len; p++) {
           var enc = seq[off + p];
-          if (!isAdmissible(enc, tailPotential)) continue;
-          var head = arcHead(enc);
+          var res, head, cost;
+          if (enc >= 0) { res = resF[enc]; head = head2[enc]; cost = scost[enc]; }
+          else { var nf0 = -enc - 1; res = resR[nf0]; head = tail2[nf0]; cost = -scost[nf0]; }
+          if (res <= 0) continue;
+          if (cost + tailPotential - pot[head] >= 0) continue;
           // 前瞻：head 也接不住就提前 relabel 它（C++ 同款，少了这句解就退化）
           if (excess[head] >= 0 && !nodeHasAdmissibleArc(head)) {
             if (!relabel(head)) return false;
-            if (!isAdmissible(enc, tailPotential)) continue;
+            if (enc >= 0) { res = resF[enc]; head = head2[enc]; cost = scost[enc]; }
+            else { var nf1 = -enc - 1; res = resR[nf1]; head = tail2[nf1]; cost = -scost[nf1]; }
+            if (!(res > 0 && cost + tailPotential - pot[head] < 0)) continue;
           }
-          var delta = Math.min(excess[node], arcRes(enc));
+          var avail = excess[node];
+          var delta = avail < res ? avail : res;
           var headActiveBefore = excess[head] > 0;
-          pushFlow(delta, enc, node);
-          if (excess[head] > 0 && !headActiveBefore) stack.push(head);
+          if (enc >= 0) {
+            resF[enc] -= delta;
+            resR[enc] += delta;
+          } else {
+            var nf2 = -enc - 1;
+            resR[nf2] -= delta;
+            resF[nf2] += delta;
+          }
+          excess[node] = avail - delta;
+          excess[head] += delta;
+          if (excess[head] > 0 && !headActiveBefore) pushStack(head);
           if (excess[node] === 0) {
             firstAdm[node] = p;
             return true;
@@ -764,16 +808,30 @@
         var slen = seqLen[sv];
         for (var sp = firstAdm[sv]; sp < slen; sp++) {
           var senc = seq[soff + sp];
-          if (isAdmissible(senc, stp)) pushFlow(arcRes(senc), senc, sv);
+          var sres, shead, scostV;
+          if (senc >= 0) { sres = resF[senc]; shead = head2[senc]; scostV = scost[senc]; }
+          else { var snf = -senc - 1; sres = resR[snf]; shead = tail2[snf]; scostV = -scost[snf]; }
+          if (!(sres > 0 && scostV + stp - pot[shead] < 0)) continue;
+          // 推满
+          if (senc >= 0) {
+            resF[senc] -= sres;
+            resR[senc] += sres;
+          } else {
+            var snf2 = -senc - 1;
+            resR[snf2] -= sres;
+            resF[snf2] += sres;
+          }
+          excess[sv] -= sres;
+          excess[shead] += sres;
         }
         firstAdm[sv] = slen;
       }
 
       // InitializeActiveNodeStack：节点升序 push，LIFO 弹出
-      var stack = [];
-      for (var av = 0; av < augNodes; av++) if (excess[av] > 0) stack.push(av);
+      stackTop = 0;
+      for (var av = 0; av < augNodes; av++) if (excess[av] > 0) pushStack(av);
 
-      while (stack.length) {
+      while (stackTop > 0) {
         if (numRelabels >= augNodes) {
           numRelabels = 0;
           if (self.usePriceUpdate) {
@@ -781,8 +839,8 @@
             throw new Error('OrToolsMinCostFlow: usePriceUpdate=true 的 UpdatePrices 未实现');
           }
         }
-        var node = stack.pop();
-        if (!discharge(node, stack)) {
+        var node = stackBuf[--stackTop];
+        if (!discharge(node)) {
           ok = false;
           break;
         }
