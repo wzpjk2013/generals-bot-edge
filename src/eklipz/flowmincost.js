@@ -849,12 +849,24 @@
     this._fakeIdCounter = 0;
   }
 
-  // python 用 random.randint(1000000, 9000000) 造 fake node id。这里用确定性的递增占位 id，
-  // 只保证不与真 island id、也不与其他 fake node 冲突（id 数值不参与任何决策）。
+  // python 用 `random.randint(1000000, 9000000)` 造 fake node id，且这个 id 会进
+  // `all_node_ids` 这个 set —— set 的槽位序取决于 id 数值，而 Phase 4 的 fake-escape
+  // 弧正是按 set 迭代序插入的，于是 fake id 直接决定弧序、进而在 0 成本多解时决定选哪个解。
+  // 所以这里的 id 必须和 python 同源（EK.rng = 种子 0 的 CPython MT），不能随便占号。
   DirectOrToolsGraphBuilder.prototype._nextFakeNodeId = function (usedNodes, islands) {
-    var candidate = 1000000 + this._fakeIdCounter++;
-    while (usedNodes.has(candidate) || islandById(islands, candidate) !== undefined) {
-      candidate = 1000000 + this._fakeIdCounter++;
+    var rng = EK.rng;
+    if (!rng || typeof rng.randint !== 'function') {
+      var fallback = 1000000 + this._fakeIdCounter++;
+      while (usedNodes.has(fallback) || islandById(islands, fallback) !== undefined) {
+        fallback = 1000000 + this._fakeIdCounter++;
+      }
+      return fallback;
+    }
+    var candidate = rng.randint(1000000, 9000000);
+    var guard = 0;
+    while ((usedNodes.has(candidate) || islandById(islands, candidate) !== undefined) && guard < 1000) {
+      candidate = rng.randint(1000000, 9000000);
+      guard++;
     }
     return candidate;
   };
@@ -1531,9 +1543,11 @@
     var debugFakeEscapeArcIndexes = new Set();
     if (DEBUG_OR_TOOLS_FAKE_NODE_ESCAPE_ARCS) {
       perf(perfTimer, 'OrTools build debug fake escape arcs');
-      var escapeNodes = [];
-      allNodeIds.forEach(function (n) { escapeNodes.push(n); });
-      escapeNodes.sort(function (a, b) { return a - b; });
+      /* python 是 `for node_id in list(all_node_ids):`（OrToolsFlowDirectionFinder.py:1490），
+       * 即 CPython set 槽位序，不是升序 —— 弧插入序一变，等成本多解就选到别的解。 */
+      var escapeNodes = (typeof EK !== 'undefined' && EK.PySetOrder)
+        ? EK.PySetOrder.pySetSlots(Array.from(allNodeIds))
+        : (function () { var arr = []; allNodeIds.forEach(function (n) { arr.push(n); }); arr.sort(function (a, b) { return a - b; }); return arr; })();
       for (var eni = 0; eni < escapeNodes.length; eni++) {
         var escapeNodeId = escapeNodes[eni];
         if (escapeNodeId === 0) continue;

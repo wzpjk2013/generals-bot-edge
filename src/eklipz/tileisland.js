@@ -87,6 +87,15 @@
     return arr.slice().sort(cmpXY);
   }
 
+  // 原版把 Tile 放进 set 再遍历时，顺序由 CPython 哈希表槽位决定（不是插入序，也不是
+  // (x,y) 序）。unique_id 的分配序直接跟着这个走，而 ortools 的节点编号又由 uid 决定，
+  // 所以顺序错一格就会让等成本多流问题选到不同的解。实现在 pysetorder.js。
+  function pySetOrder(coll) {
+    var m = EK.PySetOrder;
+    if (!m) return Array.from(coll);
+    return m.pyHashOrder(coll);
+  }
+
   function sortTilesByArmy(iterable) {
     var arr = Array.from(iterable);
     arr.sort(function (a, b) {
@@ -1282,9 +1291,9 @@
     var pendingArmyTiles = new Set();
     var shouldForceBorderSolo = mode !== IslandBuildMode.GroupByArmy || this.force_territory_borders_to_single_tile_islands;
 
-    var compSorted = Array.from(componentTiles).sort(function (a, b) {
-      return a.tile_index - b.tile_index;
-    });
+    // 原版 `for tile in componentTiles:` —— set 迭代序。这一步不改成员，只决定
+    // forcedSoloTiles / pendingArmyTiles 的插入序，进而决定它们自己的 set 表布局。
+    var compSorted = pySetOrder(componentTiles);
     for (var i = 0; i < compSorted.length; i++) {
       var tile = compSorted[i];
       var mustBeSolo = tile.isCity || tile.isGeneral;
@@ -1310,9 +1319,7 @@
     var leafIslandByTile = new Map();
     var groupByArmyWithinComponent = mode === IslandBuildMode.GroupByArmy && team === this.friendly_team;
 
-    var forcedSorted = Array.from(forcedSoloTiles).sort(function (a, b) {
-      return a.tile_index - b.tile_index;
-    });
+    var forcedSorted = pySetOrder(forcedSoloTiles);
     for (var f = 0; f < forcedSorted.length; f++) {
       var ftile = forcedSorted[f];
       var candidateTiles = new Set([ftile]);
@@ -1330,9 +1337,15 @@
     }
 
     var visited = new Set();
-    var baseSorted = Array.from(baseTiles).sort(function (a, b) {
-      return a.tile_index - b.tile_index;
-    });
+    // 原版 `baseTiles = componentTiles.difference(forcedSoloTiles).difference(pendingArmyTiles)`
+    // 是两次 set 拷贝，每次按 used*2 预分配（见 pySetCopyOrder 注释），所以它的表比
+    // 「逐个 add 出来的 set」大一档，迭代序也不同 —— 这里必须用 copy 语义。
+    var baseInsertion = [];
+    for (var ci = 0; ci < compSorted.length; ci++) {
+      var ct = compSorted[ci];
+      if (!forcedSoloTiles.has(ct) && !pendingArmyTiles.has(ct)) baseInsertion.push(ct);
+    }
+    var baseSorted = EK.PySetOrder ? EK.PySetOrder.pySetCopyOrder(baseInsertion) : baseInsertion;
     for (var bi = 0; bi < baseSorted.length; bi++) {
       var btile = baseSorted[bi];
       if (visited.has(btile)) continue;
@@ -1375,9 +1388,9 @@
     // 而 tile_count>=4 就不再吸）。原版在这里遍历的是 Python set，顺序是对象 hash 序，
     // 跨进程不可复现；这里固定按 tile_index 升序，保证同输入同输出。
     // 需要复刻某次 Python 运行可以用 pending_order_override 注入顺序。
-    var pendingSorted = Array.from(pendingArmyTiles).sort(function (a, b) {
-      return a.tile_index - b.tile_index;
-    });
+    // 顺序会改变合并结果（先建的岛会吸后来者，tile_count>=4 就不再吸），
+    // 所以这里按原版的 set 迭代序走。
+    var pendingSorted = pySetOrder(pendingArmyTiles);
     if (this.pending_order_override) {
       var ordMap2 = new Map();
       this.pending_order_override.forEach(function (idx, rank) {
@@ -1697,11 +1710,10 @@
     // 原版这里写死 True（注释里的 mode 判断是旧版残留）
     var shouldForceBorderSolo = true;
 
-    var its = island.tile_set.values();
-    while (true) {
-      var step = its.next();
-      if (step.done) break;
-      var tile = step.value;
+    // 原版 `for tile in island.tile_set:` —— set 迭代序，不是插入序。uid 就按这个分配。
+    var soloOrder = pySetOrder(island.tile_set);
+    for (var ti = 0; ti < soloOrder.length; ti++) {
+      var tile = soloOrder[ti];
       var mustBeSolo = tile.isCity || tile.isGeneral;
       if (shouldForceBorderSolo && this.force_territory_borders_to_single_tile_islands && !mustBeSolo) {
         mustBeSolo = this.must_tile_be_solo(tile, island.team);

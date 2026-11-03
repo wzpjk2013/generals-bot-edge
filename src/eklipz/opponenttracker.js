@@ -633,8 +633,53 @@
 
   var OT = OpponentTracker.prototype;
 
+  /* py 侧这些团队表是在「玩家入座、队伍数确定」时就按最终宽度建满的，长度恒等；
+   * JS 里 FFA 中途被消灭/重连会让队伍数变化，于是 arr[team] 取到 undefined。
+   * 三条硬约束：只扩容不截断；新槽用与构造函数同类的默认值（不许 undefined）；
+   * 遍历仍然由 map.unique_teams / this._team_indexes 驱动，不改成 for-in。 */
+  OT._sync_team_tables = function () {
+    var map = this.map;
+    var maxTeam = -1;
+    for (var u = 0; u < map.unique_teams.length; u++) {
+      var t = map.unique_teams[u];
+      if (t > maxTeam) maxTeam = t;
+    }
+    if (map.unique_teams.length === 0 || maxTeam < 0) return;
+    var teamRange = maxTeam + 2;
+
+    // current_team_scores / team_attack_cycle_timings 按「最大 team id + 2」建表，缺的补一个真表
+    while (this.current_team_scores.length < teamRange) {
+      var tScore = this.current_team_scores.length;
+      this.current_team_scores.push(map.get_team_stats_by_team_id(tScore));
+    }
+    if (this.team_attack_cycle_timings) {
+      while (this.team_attack_cycle_timings.length < teamRange) {
+        var tAtk = this.team_attack_cycle_timings.length;
+        this.team_attack_cycle_timings.push([new TeamAttackData(tAtk, 43, 0.5, 0.5)]);
+      }
+    }
+
+    // 其余几张是 SAFE_PLAYERS_CAP 宽的定长表，队伍维度不会超过它
+    var cap = Math.max(SAFE_PLAYERS_CAP, teamRange);
+    while (this.last_team_scores.length < cap) this.last_team_scores.push(null);
+    while (this.team_cycle_stats_history.length < cap) this.team_cycle_stats_history.push(null);
+    while (this.current_team_cycle_stats.length < cap) this.current_team_cycle_stats.push(null);
+    while (this.team_score_data_history.length < cap) this.team_score_data_history.push({});
+    while (this._players_lookup_by_team.length < cap) this._players_lookup_by_team.push([]);
+
+    // 玩家维度：team id 的权威来源是 map.team_ids_by_player_index，只补尾部，不改已有槽
+    var lookup = this._team_lookup_by_player;
+    if (lookup && this.map.players.length > lookup.length) {
+      for (var p = lookup.length; p < this.map.players.length; p++) {
+        var tid = map.team_ids_by_player_index[p];
+        lookup.push(tid === undefined || tid === null ? -1 : tid);
+      }
+    }
+  };
+
   OT.analyze_turn = function (targetPlayer) {
     this.targetPlayer = targetPlayer;
+    this._sync_team_tables();
 
     for (var pi = 0; pi < this.map.players.length; pi++) {
       // 每回合先一律记成迷雾采集，后面再被真实动作覆盖

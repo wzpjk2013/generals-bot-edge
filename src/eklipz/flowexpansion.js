@@ -1388,6 +1388,8 @@
     var currentEconValue = 0.0;
     var includedTargetNodes = [];
     var maxTurns = turnBudget;
+    // 逐格轨迹：econ 偏差只能落到「某一格的 prio/兵力」上，caps 那张表看不出来
+    var trail = [];
 
     for (var ci = 0; ci < targetContributions.length; ci++) {
       var node = targetContributions[ci].flow_node;
@@ -1403,10 +1405,13 @@
         i2 += 1;
         if (targetContributions[ci].is_crossing) {
           currentArmyCost -= this._get_tile_army(tile);
+          trail.push([currentTurn, island.unique_id, tile.tile_index, -this._get_tile_army(tile), null]);
         } else {
-          if (prioMat) currentEconValue += prioMat.raw[tile.tile_index];
+          var pv = prioMat ? prioMat.raw[tile.tile_index] : null;
+          if (prioMat) currentEconValue += pv;
           currentArmyCost += this._get_tile_army(tile);
           currentEconValue += (island.team === this.target_team ? enCapVal() : 1.0);
+          trail.push([currentTurn, island.unique_id, tile.tile_index, this._get_tile_army(tile), pv]);
         }
         lookup[currentTurn] = new FlowTurnsEntry({
           turns: currentTurn,
@@ -1421,6 +1426,9 @@
         });
       }
       if (currentTurn > maxTurns) break;
+    }
+    if (typeof global !== 'undefined' && global.__FEDBG) {
+      (global.__FEDBG.ctrails = global.__FEDBG.ctrails || []).push(trail);
     }
     return lookup;
   };

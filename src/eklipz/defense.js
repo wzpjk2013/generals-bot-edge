@@ -2038,7 +2038,15 @@
               cur = cur.children[0];
               path.add_next(cur.tile, false);
             }
-            if (path.length > 0) bot.curPath = path;
+            /* 这条 path 的起点是 gather 树里第一个 gatherTurns>0 的节点，而 included 全是
+             * 侧翼迷雾格（不在我方领土内），所以起点可能落在迷雾/敌方格上。真那样的话
+             * curPath 就成了一条「非我方视角」的路径，下一回合 continue_cur_path 会把它
+             * 当首步吐出去，撞上 find_move 末尾那条 assert（py 那边直接炸，JS 这边是废招）。
+             * 起点不是我方就不挂 —— 这一轮的 move 已经拿到了，不挂路径没有额外损失。 */
+            var pathStartTile = path.start ? path.start.tile : null;
+            if (path.length > 0 && pathStartTile && pathStartTile.player() === _player(bot.general)) {
+              bot.curPath = path;
+            }
           }
         } else if (3 * valGathered / wasteWeight < playerArmyBaseline) {
           move = null;

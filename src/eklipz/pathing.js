@@ -172,6 +172,15 @@
               }
 
               if (move !== null && move !== undefined) {
+                /* 上面那个 while 已经拦过「source 不是我方」，但 MoveListPath 的列表是共享可变的，
+                 * 中间被别的分支改过就会出现「校验时是好的、返回时已经不是」的窗口。
+                 * 这里再验一次：非我方格当 source 出手在引擎里是废招（py 那边直接 assert 炸），
+                 * 宁可这回合不出招，也不要把废招交上去。 */
+                if (move.source.player() !== bot.general.player()) {
+                  bot.curPath = null;
+                  bot.curPathPrio = -1;
+                  return [false, null];
+                }
                 return [true, EK.BotRepetition.move_half_on_repetition(bot, move, 6, 3)];
               }
             }
