@@ -76,9 +76,81 @@
     throw new Error('gathermax.js 需要 EK.Map.get_teams_array');
   }
 
+  // 只在 GB_GMAX_TRACE=1 时打印现场：真机报错只给一行栈，没有入参就分不清是空 BFS 结果、
+  // 负预算还是背包自己抛的超时，而这三种修法完全不同。
+  function gmaxTraceOn() {
+    return typeof process !== 'undefined' && process.env && process.env.GB_GMAX_TRACE === '1';
+  }
+
+  function traceThrow(label, info, err) {
+    if (!gmaxTraceOn()) throw err;
+    var msg = '[gmax] ' + label + ' 抛错: ' + (err && err.message ? err.message : String(err));
+    try { console.error(msg + '\n  ' + info()); } catch (ignored) { console.error(msg); }
+    throw err;
+  }
+
+  function traceKnapsackEstimate(turns, valuePerTurnPathPerTile) {
+    var n = 0;
+    var maxGroupSize = 0;
+    if (valuePerTurnPathPerTile && typeof valuePerTurnPathPerTile.forEach === 'function') {
+      valuePerTurnPathPerTile.forEach(function (group) {
+        if (!group || group.length === 0) return;
+        if (group.length > maxGroupSize) maxGroupSize = group.length;
+        n += group.length;
+      });
+    }
+    if (n === 0) return;
+    var grSq = Math.sqrt(maxGroupSize);
+    // 4e-8 是 KnapsackUtilsCpp.cpp:46 的口径，也就是原版线上真正在跑的那支；
+    // 2.2e-7 只是 py3.12 上跑 oracle 时的 purepy 降级，仅作对照打印。
+    var est = maxGroupSize === n
+      ? n * turns * 0.00000004
+      : n * turns * grSq * 0.00000004;
+    var estPurepy = maxGroupSize === n
+      ? n * turns * 0.00000022
+      : n * turns * grSq * 0.00000022;
+    if (est > 0.0005) {
+      console.error('[gmax] knapsack-est turns=' + turns + ' n=' + n + ' maxGroup=' + maxGroupSize +
+        ' est_cpp=' + est.toFixed(4) + ' est_purepy=' + estPurepy.toFixed(4) +
+        (est > 0.005 ? '  **超过 0.005，JS 会抛**' : ''));
+    }
+  }
+
   function searchMod() { return need('EK.search', EK.search); }
   function gatherMod() { return need('EK.Gather', EK.Gather); }
   function mapMatrixCtor() { return need('EK.MapMatrix', EK.MapMatrix); }
+
+  // 1 兵的起点不可能出兵（走一半也要 3 兵，走一格要 2 兵）。引擎侧出现的 `非法招 army1`
+  // 如果是我这三条 gather 路径吐出来的，就说明树里有不该出兵的地块；只在 GB_GMAX_TRACE=1
+  // 时检查，正常对局零开销。
+  // 注意：真正被拿去出招的是树的叶子（get_tree_moves 取最外层节点当 move.source），
+  // 不是根，所以这里沿 children 整棵树走，并标出 root / leaf / mid。
+  function guardArmy1(label, nodes) {
+    if (!gmaxTraceOn() || !nodes || typeof nodes.length !== 'number') return;
+    var stack = [];
+    for (var gi = 0; gi < nodes.length; gi++) {
+      if (nodes[gi]) stack.push([nodes[gi], 'root']);
+    }
+    var visited = 0;
+    while (stack.length > 0 && visited < 4000) {
+      var entry = stack.pop();
+      var node = entry[0];
+      var kind = entry[1];
+      visited++;
+      var tile = node && node.tile;
+      var children = node && node.children ? node.children : [];
+      var role = kind === 'root' ? (children.length === 0 ? 'root-leaf' : 'root') : (children.length === 0 ? 'leaf' : 'mid');
+      if (tile && typeof tile.army === 'function' && tile.army() <= 1) {
+        console.error('[GMAX-GUARD] ' + label + ' role=' + role + ' tile=' + tile.tile_index +
+          ' army=' + tile.army() + ' owner=' + (typeof tile.player === 'function' ? tile.player() : '?') +
+          ' gatherTurns=' + (node.gatherTurns === undefined ? '?' : node.gatherTurns) +
+          ' trunkDistance=' + (node.trunkDistance === undefined ? '?' : node.trunkDistance));
+      }
+      for (var ci = 0; ci < children.length; ci++) {
+        if (children[ci]) stack.push([children[ci], 'child']);
+      }
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Python 元组比较 / heapq 语义
@@ -218,6 +290,12 @@
       valueFunc = function (path) { return Math.trunc(pathValueOf(path) * 1000); };
     }
 
+    // 只有 GB_GMAX_TRACE=1 时才算这个估计值：原版 C++/纯 Python 两支的系数不同
+    // （KnapsackUtilsCpp.cpp:46 用 4e-8，KnapsackUtilsPy.py:75 用 2.2e-7，阈值都是 0.005），
+    // 本仓 knapsack 抄的是后者，于是同样的输入 JS 会先抛「potential long run」。把它打出来，
+    // 真实对局里到底离阈值多远就有数字可依，不用靠猜。
+    if (gmaxTraceOn()) traceKnapsackEstimate(turns, valuePerTurnPathPerTile);
+
     var groups = [];
     var paths = [];
     var values = [];
@@ -303,27 +381,61 @@
     }
 
     var S = searchMod();
-    var valuePerTurnPathPerTilePerDistance = S.breadth_first_dynamic_max_per_tile_per_distance_global_visited(
-      map, startTilesDict, valueFunc, {
-        maxTurns: remainingTurns,
-        maxDepth: 10000,
-        noNeutralCities: true,
-        skipTiles: skipTiles,
-        searchingPlayer: searchingPlayer,
-        priorityFunc: priorityFunc,
-        skipFunc: subSkip,
-        ignoreStartTile: ignoreStartTile,
-        incrementBackward: incrementBackward,
-        preferNeutral: preferNeutral,
-        ignoreNonPlayerArmy: !useTrueValueGathered,
-        ignoreIncrement: true,
-        priorityMatrixSkipStart: true,
-        pathValueFunc: pathValueFunc,
-        noLog: !shouldLog
-      });
+    var valuePerTurnPathPerTilePerDistance;
+    try {
+      valuePerTurnPathPerTilePerDistance = S.breadth_first_dynamic_max_per_tile_per_distance_global_visited(
+        map, startTilesDict, valueFunc, {
+          maxTurns: remainingTurns,
+          maxDepth: 10000,
+          noNeutralCities: true,
+          skipTiles: skipTiles,
+          searchingPlayer: searchingPlayer,
+          priorityFunc: priorityFunc,
+          skipFunc: subSkip,
+          ignoreStartTile: ignoreStartTile,
+          incrementBackward: incrementBackward,
+          preferNeutral: preferNeutral,
+          ignoreNonPlayerArmy: !useTrueValueGathered,
+          ignoreIncrement: true,
+          priorityMatrixSkipStart: true,
+          pathValueFunc: pathValueFunc,
+          noLog: !shouldLog
+        });
+    } catch (e) {
+      traceThrow('bfs(max_set)', function () {
+        return 'turn=' + (map && map.turn) + ' turns=' + remainingTurns + ' full=' + fullTurns +
+          ' starts=' + (startTilesDict && startTilesDict.size) + ' player=' + searchingPlayer +
+          ' skip=' + (skipTiles ? skipTiles.size : 'null') + ' isMap=' + (startTilesDict instanceof Map);
+      }, e);
+    }
 
-    var knap = knapsack_max_set_gather_iteration(
-      remainingTurns, valuePerTurnPathPerTilePerDistance, shouldLog ? logEntries : null);
+    var knap;
+    try {
+      knap = knapsack_max_set_gather_iteration(
+        remainingTurns, valuePerTurnPathPerTilePerDistance, shouldLog ? logEntries : null);
+    } catch (e) {
+      traceThrow('knapsack(max_set)', function () {
+        var groups = 0, items = 0, minLen = null, maxLen = null, nullPaths = 0;
+        if (valuePerTurnPathPerTilePerDistance && typeof valuePerTurnPathPerTilePerDistance.forEach === 'function') {
+          valuePerTurnPathPerTilePerDistance.forEach(function (g) {
+            if (!g) { nullPaths += 1; return; }
+            if (g.length > 0) groups += 1;
+            for (var i = 0; i < g.length; i++) {
+              items += 1;
+              var len = g[i] && g[i].length;
+              if (typeof len !== 'number') { nullPaths += 1; continue; }
+              if (minLen === null || len < minLen) minLen = len;
+              if (maxLen === null || len > maxLen) maxLen = len;
+            }
+          });
+        }
+        return 'turn=' + (map && map.turn) + ' turns=' + remainingTurns + ' full=' + fullTurns +
+          ' starts=' + (startTilesDict && startTilesDict.size) + ' player=' + searchingPlayer +
+          ' groups=' + groups + ' items=' + items + ' minLen=' + minLen + ' maxLen=' + maxLen +
+          ' badPaths=' + nullPaths + ' bfs=' + (valuePerTurnPathPerTilePerDistance === null ? 'null' :
+            (valuePerTurnPathPerTilePerDistance === undefined ? 'undefined' : typeof valuePerTurnPathPerTilePerDistance));
+      }, e);
+    }
     return [Math.round(knap[0]), knap[1]];
   }
 
@@ -1495,6 +1607,8 @@
     GatherMaxSet.last_total_value = totalValue;
     void distPriorityMap;
 
+    if (gcp && gcp.root_nodes) guardArmy1('max_set', gcp.root_nodes);
+
     return gcp;
   }
 
@@ -2038,6 +2152,7 @@
       useTrueValueGathered, includeGatherTreeNodesThatGatherNegative, shouldLog, false,
       priorityMatrix, cutoffTime, fastMode, false);
 
+    guardArmy1('max_gather', res[2]);
     return res[2];
   }
 
@@ -2433,6 +2548,7 @@
       viewInfo, distPriorityMap, depthPriorityMap, useTrueValueGathered,
       includeGatherTreeNodesThatGatherNegative, shouldLog, false, priorityMatrix, cutoffTime,
       fastMode, slowMode);
+    guardArmy1('depth_gather', res[2]);
     return res[2];
   }
 

@@ -171,8 +171,12 @@
     }
 
     var maxGrSq = Math.sqrt(maxGroupSize);
-    var estTime = n * capacity * maxGrSq * 0.00000022;
-    if (maxGroupSize === n) estTime = n * capacity * 0.00000022;
+    // 系数照 KnapsackUtilsCpp.cpp:46 的 4e-8，不是 KnapsackUtilsPy.py:75 的 2.2e-7：
+    // 原版线上跑的就是 C++ 扩展那个实现，purepy 只是我们为了在 py3.12 上跑 oracle 加的
+    // GB_PURE_PY_KNAPSACK=1 降级开关。抄错这一支会让 JS 在 5.5 倍更小的输入上就抛
+    // 「potential long run」，代价是整回合不出招。
+    var estTime = n * capacity * maxGrSq * 0.00000004;
+    if (maxGroupSize === n) estTime = n * capacity * 0.00000004;
     if (estTime > longRuntimeThreshold) {
       throw new Error('Knapsack potential long run est ' + estTime.toFixed(3) + ': the inputs are going to result in a substantial runtime');
     }
