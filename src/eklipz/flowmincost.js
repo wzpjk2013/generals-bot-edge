@@ -1682,7 +1682,10 @@
    * 这里返回 null（原版上层靠这个降级）。
    */
   OrToolsFlowComputer.prototype.compute_flow = function (islands, graphData) {
-    // 默认走原来的 SPFA：逐弧忠实的 OrToolsMinCostFlow 单步要 500ms 级，真机 tick 500ms 顶不住。
+    // 默认走原来的 SPFA，**不是因为 OrTools 慢**（优化后求解器 28–32ms/次、整步 284ms
+    // 反而比 SPFA 的 333ms 快），而是因为成对 A/B 未过关：同机同种子串行比，OrTools 净差
+    // −6.25pt（四档 68.75% vs SPFA 75.0%，gc 掉 50pt）。切换门槛写在同一批实验记录里：
+    // 净差为正且至少 2 档不同向。
     // GB_MCF_ORTOOLS=1 才启用（对拍/研究用），GB_MCF_SPFA=1 保留为强制回退（两个都不设 = SPFA）。
     var solver = envFlag('GB_MCF_ORTOOLS') ? new OrToolsMinCostFlow() : new MinCostFlow();
     for (var a = 0; a < graphData.start_nodes.length; a++) {

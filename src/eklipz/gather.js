@@ -2110,8 +2110,13 @@
   }
 
   // 确定性 prize-collecting 贪心（见上，未与原版 pcst_fast 对齐）
+  // cutoffSec：py 的 pcst 是「有预算的搜索」，超时带着 bestResult 退出；这里照抄预算语义
+  // （GatherSteiner.py:370/:447 的 `time.perf_counter() > cutoffTime - 0.001`），超时就把
+  // timedOut 交出去，由调用方决定当无解 —— 不做尽力而为，否则「算不出来」这个信号就没了。
+  // 时钟一律走 EK.clock.nowSec()：GB_EK_FIXED_TIME 下它恒为 0，永不超时（= 加预算之前的旧行为），
+  // 所以钉死时钟的对拍不会因为这条退化。
   function _pcst_greedy(map, targetTurns, rootTiles, tilePrizeMatrix, tileExtraCostMatrix,
-                        skipTiles, mustInclude) {
+                        skipTiles, mustInclude, cutoffSec) {
     var inTree = new Set();
     var tree = [];
     var roots = sortedByTileIndex(rootTiles || []);
@@ -2125,7 +2130,12 @@
       });
     }
 
+    var timedOut = false;
     while (tree.length < targetTurns) {
+      if (cutoffSec !== null && cutoffSec !== undefined && EK.clock.nowSec() > cutoffSec - 0.001) {
+        timedOut = true;
+        break;
+      }
       // 从当前树做一次 Dijkstra（代价 = 1 + 额外代价），拿到每个格子的路代价与父格
       var dist = new Map();
       var parent = new Map();
@@ -2161,6 +2171,10 @@
         });
       }
 
+      if (cutoffSec !== null && cutoffSec !== undefined && EK.clock.nowSec() > cutoffSec - 0.001) {
+        timedOut = true;
+        break;
+      }
       var bestIdx = -1;
       var bestScore = -Infinity;
       var keys = Array.from(dist.keys()).sort(function (a, b) {
@@ -2192,23 +2206,37 @@
       for (var a2 = 0; a2 < added.length; a2++) tree.push(map.get_tile_by_tile_index(added[a2]));
       if (added.length === 0) break;
     }
-    return tree;
+    return { tree: tree, timedOut: timedOut };
   }
 
   function get_prize_collecting_gather_mapmatrix(map, searchingPlayer, targetTurns, maxTurns, gatherMatrix,
                                                  captureMatrix, rootTiles, negativeTiles,
                                                  prioritizeCaptureHighArmyTiles, skipTiles,
                                                  hintIncludeTiles, tilesToHalf, enemyArmyCostFactor,
-                                                 enemyArmyLimit) {
+                                                 enemyArmyLimit, timeLimit) {
     if (searchingPlayer === undefined || searchingPlayer === null) searchingPlayer = -2;
     if (rootTiles === undefined || rootTiles === null) rootTiles = [];
     var built = _build_pcst_tile_prize_matrix(map, searchingPlayer, rootTiles, negativeTiles,
       !!prioritizeCaptureHighArmyTiles, skipTiles, enemyArmyCostFactor === undefined ? 0.1 : enemyArmyCostFactor,
       enemyArmyLimit === undefined ? 10 : enemyArmyLimit, gatherMatrix, captureMatrix, tilesToHalf,
       hintIncludeTiles);
-    var want = targetTurns >= 0 ? targetTurns : (maxTurns === undefined || maxTurns === null ? 40 : maxTurns);
-    var out = _pcst_greedy(map, want, rootTiles, built[0], built[3], skipTiles, null);
-    if (out.length === 0) return null;
+    // py GatherSteiner.py:301 `targetNodeCount = targetTurns + len(rootTiles)`：
+    // 树的总节点数是「目标回合数 + 根格数」，不是「目标回合数」——rootTiles 已经先被塞进树，
+    // 用 targetTurns 当整树尺寸会让结果系统性少 len(rootTiles) 格（多根聚合时差 3~8 格）。
+    // py 默认 maxTurns=2000（GatherSteiner.py:302），maxNodes 就是「上限 + 根格数」（:304）。
+    var rootsN = rootTiles.length || 0;
+    var effMaxTurns = maxTurns === undefined || maxTurns === null ? 2000 : maxTurns;
+    var want = targetTurns >= 0 ? targetTurns + rootsN : (effMaxTurns + rootsN);
+    var cutoffSec = timeLimit === undefined || timeLimit === null
+      ? EK.clock.nowSec() + 0.2
+      : EK.clock.nowSec() + timeLimit;
+    var res = _pcst_greedy(map, want, rootTiles, built[0], built[3], skipTiles, null, cutoffSec);
+    // py 的两条无解判据（GatherSteiner.py:360 / :437 `1 < vCount <= maxNodes`）：
+    // 只吐出根自己（vCount 不够）算无解，超出节点上限也算无解。取不到解就返回 null，
+    // 让上层走「没有 plan」的分支 —— 之前这里永远有 plan，等于把 py 的失败路径吞掉了。
+    if (res.timedOut) return null;
+    var out = res.tree;
+    if (!(out.length > 1 && out.length <= effMaxTurns + rootsN)) return null;
     return out;
   }
 

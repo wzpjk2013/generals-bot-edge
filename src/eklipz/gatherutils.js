@@ -157,7 +157,12 @@
       map, asP, approxTurns, maxT, gMat, cMat, rootTiles, neg,
       !!opts.prioritizeCaptureHighArmyTiles, skip,
       opts.hintIncludeTiles || null, half,
-      opts.enemyArmyCostFactor, opts.enemyArmyLimit);
+      opts.enemyArmyCostFactor, opts.enemyArmyLimit,
+      // py 的 timeLimit 在 GatherSteiner.get_prize_collecting_gather_mapmatrix 里变成
+      // cutoffTime = now + timeLimit（GatherSteiner.py:247），超时带着 bestResult(可能为 None)
+      // 退出。原版调用方（BotGatherOps.py:1064）不传，吃默认 0.05 —— 这就是热路径上的闸门，
+      // 早前这里没往下传，等于把 py 的预算彻底摘掉了。
+      timeLim);
 
     if (!steinerNodes || steinerNodes.length === 0) return null;
 
