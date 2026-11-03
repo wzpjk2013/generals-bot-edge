@@ -2262,5 +2262,15 @@
   EK.Gather = Gather;
   EK.gather = Gather;
 
+  // 原版 py 的 gather_approximate_turns_to_tiles 挂在 Gather 包下，我们把它实现
+  // 放到了后加载的 gatherutils.js（GatherUtils 命名空间）。调用点（botmain.js:1646、
+  // combatops.js:2130）都按 EK.Gather.xxx 取，所以这里补一条转发别名。
+  // 用惰性查表而不是直接赋值：gather.js 比 gatherutils.js 先加载，直接赋值会拿到 undefined。
+  Gather.gather_approximate_turns_to_tiles = function () {
+    var f = EK.GatherUtils && EK.GatherUtils.gather_approximate_turns_to_tiles;
+    if (typeof f !== 'function') return null;
+    return f.apply(EK.GatherUtils, arguments);
+  };
+
   if (typeof module !== 'undefined' && module.exports) module.exports = EK;
 })(typeof window !== 'undefined' ? window : global);

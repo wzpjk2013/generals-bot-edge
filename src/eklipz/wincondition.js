@@ -1247,7 +1247,12 @@
 
     if (!economyLost || !armyLost) return false;
 
-    var BotKillTiming = (EK.BotModules || {}).BotKillTiming;
+    // 原版 py Strategy/WinConditionAnalyzer.py:647 写的是
+    //   self.all_in_plan = BM.BotKillTiming.BotKillTiming.find_all_in_option(bot)
+    // 其中 BM=BotModules 是 py 里真实存在的包，模块类又是同名嵌套（包.类）。
+    // 我们这边没有 BotModules 这层包，模块直接挂在 EK.BotKillTiming，所以先试
+    // 「包.类」形状，缺了退回直接挂载点——两个都缺才算真的没移植。
+    var BotKillTiming = (EK.BotModules && EK.BotModules.BotKillTiming) || EK.BotKillTiming;
     if (isNone(BotKillTiming) || typeof BotKillTiming.find_all_in_option !== 'function') return false;
 
     var allInPlan = BotKillTiming.find_all_in_option(bot);
