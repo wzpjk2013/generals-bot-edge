@@ -805,6 +805,12 @@
 
       var newPathDict = S().breadth_first_dynamic_max_per_tile_per_distance(map, startCopy,
         value_priority_army_dist_basic, {
+          /* py ExpandUtils.py:1399 把 searchTime 当位置参数 timeCap 传进 BFS。
+           * 我们早先没传，BFS 落回默认 maxTime=0.2（是 py 单次上限
+           * singleIterationPathTimeCap=min(0.03, time_limit/3) 的 6.7 倍），
+           * 于是每轮都能扫出更多候选 → 计划长度 med17/max66 而 py 是 med13/max25，
+           * 实战表现就是过度扩张、兵摊在地盘上收不回来。 */
+          maxTime: searchTime,
           maxTurns: remainingTurns,
           maxDepth: Math.min(remainingTurns, maxDepth),
           noNeutralCities: true,
