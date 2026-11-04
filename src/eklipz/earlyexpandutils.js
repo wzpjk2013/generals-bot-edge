@@ -151,6 +151,10 @@
   function PyHeap() {
     this.q = [];
   }
+  /* evaluatePlanValue 内部按 tile_index 排序规划格；比较器提出来避免每次调用新建闭包 */
+  function EARLY_PLAN_TILE_ORDER(a, b) {
+    return a.tile_index - b.tile_index;
+  }
   PyHeap.prototype._siftdown = function (startpos, pos) {
     var q = this.q;
     var newitem = q[pos];
@@ -286,15 +290,32 @@
 
     var genPlayer = general.player();
 
+    /* 原版这里 new Set(alreadyOwned) 再逐格 add —— 每次调用都要复制一遍自家全集，
+       而返回值只用到「有没有见过」和 size。改成分层 tile 标记 + 计数器，行为完全等价。 */
+    var visitLayer = EK.search.tileStampEnter(map);
+    var visitArr = visitLayer.arr;
+    var visitGen = visitLayer.gen;
+    var cappedLayer = EK.search.tileStampEnter(map);
+    var cappedArr = cappedLayer.arr;
+    var cappedGen = cappedLayer.gen;
+    var visitedCount = 0;
+
     var alreadyVisited;
-    if (alreadyOwned) {
-      alreadyVisited = new Set(alreadyOwned);
-    } else {
-      alreadyVisited = new Set(tilesOfPlayer(map, genPlayer));
+    var srcTiles = alreadyOwned ? alreadyOwned : tilesOfPlayer(map, genPlayer);
+    var srcIt = srcTiles.values();
+    var srcCur = srcIt.next();
+    while (!srcCur.done) {
+      var srcIdx = srcCur.value.tile_index;
+      if (visitArr[srcIdx] !== visitGen) {
+        visitArr[srcIdx] = visitGen;
+        visitedCount += 1;
+      }
+      srcCur = srcIt.next();
     }
 
     var numCapped = 0;
-    var enCapped = new Set();
+    var enCappedCount = 0;
+    try {
 
     var curGenArmy = generalArmy;
     var pathIdx = 0;
@@ -340,8 +361,12 @@
         curMoveIdx += 1;
 
         var nextTile = move.dest;
-        var wasVisited = alreadyVisited.has(nextTile);
-        alreadyVisited.add(nextTile);
+        var nextTileIdx = nextTile.tile_index;
+        var wasVisited = visitArr[nextTileIdx] === visitGen;
+        if (!wasVisited) {
+          visitArr[nextTileIdx] = visitGen;
+          visitedCount += 1;
+        }
 
         if (nextTile.isSwamp) {
           // 原版：落点回合是偶数要额外掉一兵（到达那回合本来就吃沼泽惩罚）
@@ -359,7 +384,10 @@
         } else {
           numCapped += 1;
           movingArmy -= nextTile.army + 1;
-          if (nextTile.player() >= 0) enCapped.add(nextTile);
+          if (nextTile.player() >= 0 && cappedArr[nextTileIdx] !== cappedGen) {
+            cappedArr[nextTileIdx] = cappedGen;
+            enCappedCount += 1;
+          }
         }
 
         if (curMoveIdx >= curMoves.length) {
@@ -383,8 +411,12 @@
 
       turn += 1;
     }
+    } finally {
+      EK.search.tileStampExit();
+      EK.search.tileStampExit();
+    }
 
-    return alreadyVisited.size + enCapped.size * 1.2;
+    return visitedCount + enCappedCount * 1.2;
   }
 
   /* ==================================================================
@@ -399,13 +431,25 @@
 
     var adjAvailable = 0;
 
-    var planTileSet = new Set();
-    var visibleTileSet = new Set(alreadyOwned);
+    /* 原版这里是两个 Set（planTileSet / visibleTileSet）。这个函数是单局分配第一大项
+       （采样堆分析：self 1.44GB + 内建 2.92GB ≈ 20%），而两个集合都只做「判存在 + 保序去重」，
+       正好可以用 search 的分层 tile 标记替代：判存在 O(1)、零分配、保序去重靠 planTileList 自己。
+       注意两层标记不能共用一块数组，内部 BFS 可能再取一层，所以各 enter 一次。 */
+    var visLayer = EK.search.tileStampEnter(map);
+    var visArr = visLayer.arr;
+    var visGen = visLayer.gen;
+    var planLayer = EK.search.tileStampEnter(map);
+    var planArr = planLayer.arr;
+    var planGen = planLayer.gen;
+    var planTileList = [];
+
     var it = alreadyOwned.values();
     var cur = it.next();
     while (!cur.done) {
-      var adjs = cur.value.adjacents;
-      for (var i = 0; i < adjs.length; i++) visibleTileSet.add(adjs[i]);
+      var ownedTile = cur.value;
+      visArr[ownedTile.tile_index] = visGen;
+      var adjs = ownedTile.adjacents;
+      for (var i = 0; i < adjs.length; i++) visArr[adjs[i].tile_index] = visGen;
       cur = it.next();
     }
 
@@ -414,8 +458,12 @@
       if (path === null || path === undefined) continue;
       var tl = path.tileList;
       for (var ti = 0; ti < tl.length; ti++) {
-        visibleTileSet.add(tl[ti]);
-        planTileSet.add(tl[ti]);
+        var ptIdx = tl[ti].tile_index;
+        visArr[ptIdx] = visGen;
+        if (planArr[ptIdx] !== planGen) {
+          planArr[ptIdx] = planGen;
+          planTileList.push(tl[ti]);
+        }
       }
     }
 
@@ -425,10 +473,8 @@
 
     // 顺序敏感的求和：谁先被加进 visibleTileSet 会影响后面格子有多少「新视野」。
     // Python 是 set 的 hash 序（不可复现），这里统一 tile_index 升序，oracle 侧同样处理。
-    var planTiles = Array.from(planTileSet);
-    planTiles.sort(function (a, b) {
-      return a.tile_index - b.tile_index;
-    });
+    var planTiles = planTileList.slice();
+    planTiles.sort(EARLY_PLAN_TILE_ORDER);
 
     for (var k = 0; k < planTiles.length; k++) {
       var tile = planTiles[k];
@@ -438,8 +484,9 @@
       var tadj = tile.adjacents;
       for (var aj = 0; aj < tadj.length; aj++) {
         var adj = tadj[aj];
-        if (!visibleTileSet.has(adj)) {
-          visibleTileSet.add(adj);
+        var adjIdx = adj.tile_index;
+        if (visArr[adjIdx] !== visGen) {
+          visArr[adjIdx] = visGen;
           if (!adj.isObstacle) {
             // 原版这里的 8 是个魔法数（作者自己在注释里骂过），照抄
             var reward = 8 - matGet(tileWeightMap, adj);
@@ -451,7 +498,7 @@
 
     var countFunc = function (t) {
       if (
-        !planTileSet.has(t) &&
+        planArr[t.tile_index] !== planGen &&
         !alreadyOwned.has(t) &&
         !t.isNotPathable &&
         !t.isCity &&
@@ -462,7 +509,10 @@
       }
     };
 
-    EK.search.breadth_first_foreach_fast_no_neut_cities(map, Array.from(planTileSet), 3, countFunc);
+    EK.search.breadth_first_foreach_fast_no_neut_cities(map, planTileList, 3, countFunc);
+
+    EK.search.tileStampExit();
+    EK.search.tileStampExit();
 
     var pathValue = get_start_expand_captures(map, general, generalArmy, curTurn, pathList, alreadyOwned, launchTurn, noLog);
 

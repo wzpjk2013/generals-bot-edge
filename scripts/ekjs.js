@@ -430,7 +430,8 @@ function main() {
     land: [r.ekLand, r.refLand],
     army: [r.ekArmy, r.refArmy],
   }));
-  console.log('[perGame] ' + JSON.stringify({ opponent: opponent, solver: process.env.GB_MCF_ORTOOLS ? 'ortools' : 'spfa', games: perGame }));
+  // 默认求解器已是 OrTools（src/eklipz/flowmincost.js），环境变量只能回退到 SPFA
+  console.log('[perGame] ' + JSON.stringify({ opponent: opponent, solver: process.env.GB_MCF_SPFA ? 'spfa' : 'ortools', games: perGame }));
 }
 
 module.exports = { EkBot: EkBot, playGameEk: playGameEk, loadEK: loadEK };

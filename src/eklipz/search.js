@@ -220,42 +220,68 @@
   });
 
   /*
-   * deque 的等价物。Python 里 appendleft + pop / appendleft + popleft / append 混着用，
-   * 语义分别是 FIFO 和 FIFO，这里用「数组 + head 指针」实现 O(1) 出队。
+   * deque 的等价物。Python 里 appendleft + pop / appendleft + popleft / append 混着用。
+   * 特别注意 appendleft + pop 是 **FIFO**（从队头压入、从队尾取出，最早进的先出），
+   * 不能按「栈」理解；这条决定了 BFS 的入队/出队顺序。这里用环形缓冲实现四个操作都 O(1)。
+   *
+   * 为什么不是「数组 + head 指针」：那样 appendleft 必须先 _compact（head>0 就 slice 整个数组），
+   * 单局 1500 万次 appendleft ⇒ 每次复制一遍队列，实测占全部分配的 3.5GB（Deque 三件套合计），
+   * 是浏览器标签页内存尖峰的主要来源。环形缓冲不复制、不扩容时零分配。
+   * 语义与 CPython collections.deque appendleft/append/popleft/pop 完全一致。
    */
   function Deque() {
-    this.arr = [];
+    this.buf = new Array(8);
+    this.cap = 8;
     this.head = 0;
+    this.n = 0;
   }
+  Deque.prototype._grow = function () {
+    var oldCap = this.cap;
+    var newCap = oldCap * 2;
+    var nb = new Array(newCap);
+    for (var i = 0; i < this.n; i++) nb[i] = this.buf[(this.head + i) % oldCap];
+    this.buf = nb;
+    this.cap = newCap;
+    this.head = 0;
+  };
   Deque.prototype._compact = function () {
-    if (this.head > 0) {
-      this.arr = this.arr.slice(this.head);
-      this.head = 0;
-    }
+    /* 兼容旧调用点：环形缓冲不需要压缩，留空实现避免外部误用 */
   };
   Deque.prototype.appendleft = function (v) {
-    this._compact();
-    this.arr.unshift(v);
+    if (this.n === this.cap) this._grow();
+    this.head = (this.head - 1 + this.cap) % this.cap;
+    this.buf[this.head] = v;
+    this.n++;
   };
   Deque.prototype.append = function (v) {
-    this.arr.push(v);
+    if (this.n === this.cap) this._grow();
+    this.buf[(this.head + this.n) % this.cap] = v;
+    this.n++;
   };
   Deque.prototype.popleft = function () {
-    var v = this.arr[this.head++];
-    if (this.head > 1024 && this.head * 2 > this.arr.length) this._compact();
+    if (this.n === 0) return undefined;
+    var v = this.buf[this.head];
+    this.buf[this.head] = undefined;
+    this.head = (this.head + 1) % this.cap;
+    this.n--;
     return v;
   };
   Deque.prototype.pop = function () {
-    return this.arr.pop();
+    if (this.n === 0) return undefined;
+    var i = (this.head + this.n - 1) % this.cap;
+    var v = this.buf[i];
+    this.buf[i] = undefined;
+    this.n--;
+    return v;
   };
   Object.defineProperty(Deque.prototype, 'size', {
     get: function () {
-      return this.arr.length - this.head;
+      return this.n;
     }
   });
   Object.defineProperty(Deque.prototype, 'empty', {
     get: function () {
-      return this.arr.length - this.head === 0;
+      return this.n === 0;
     }
   });
 
@@ -272,6 +298,75 @@
   /* ==================================================================
    * 通用小工具
    * ================================================================== */
+
+  /*
+   * BFS 热路径的零分配脚手架。
+   *
+   * 单局 `breadth_first_foreach_fast_no_neut_cities` 被调用 90 万次（≈2200 次/回合），
+   * 每次 `new Deque()` + `new Set()` + 每个节点一个 `[tile, dist]` 二元数组；
+   * 一局 23.4GB 的回收量里这一族占最大头（--trace-gc 实测，与 soak4 的归因噪声无关）。
+   * 这里把三样东西都换成复用：
+   *   - visited 用「Int32Array 打戳 + 世代号」，不再每次 new Set（语义等价：只判 tile_index 是否进过队）
+   *   - 队列用池化的两个平行数组（tiles/dists），不再每个节点建数组对象
+   * 池化必须支持重入：foreachFunc 里可能再调一次 BFS，所以 acquire 从池里取、release 还回，
+   * 不能直接用模块级单例。
+   */
+  var BFS_POOL_MAX = 64;
+  var bfsQueuePool = [];
+
+  function bfsAcquireQueue() {
+    var p = bfsQueuePool.pop();
+    if (!p) p = { tiles: [], dists: [] };
+    return p;
+  }
+
+  function bfsReleaseQueue(p) {
+    p.tiles.length = 0;
+    p.dists.length = 0;
+    if (bfsQueuePool.length < BFS_POOL_MAX) bfsQueuePool.push(p);
+  }
+
+  var bfsVisitStamps = [];   // 递归深度 -> {arr, gen}，见 bfsEnter
+  var bfsVisitDepth = 0;
+
+  /*
+   * 取一个「已访问」标记层。每层有自己的 Int32Array 与世代号：
+   * 单层共用一块数组会让嵌套 BFS（foreachFunc 里再发起一次搜索）互相覆盖对方戳，
+   * 外层就会把访问过的格子当没访问，入队顺序和结果都变了。
+   */
+  function bfsEnter(map) {
+    var lvl = bfsVisitDepth++;
+    var s = bfsVisitStamps[lvl];
+    var need = map && map.tiles_by_index ? map.tiles_by_index.length : 0;
+    if (need <= 0) need = s ? s.arr.length : 4096;
+    if (!s) {
+      s = { arr: new Int32Array(need), gen: 0 };
+      bfsVisitStamps[lvl] = s;
+    } else if (s.arr.length < need) {
+      s.arr = new Int32Array(need);
+      s.gen = 0;
+    }
+    s.gen++;
+    /* 世代号溢出前清零，避免旧戳误判「已访问」 */
+    if (s.gen >= 2147483000) {
+      s.arr.fill(0);
+      s.gen = 1;
+    }
+    return s;
+  }
+
+  function bfsExit() {
+    if (bfsVisitDepth > 0) bfsVisitDepth--;
+  }
+
+  /* 规划器（evaluatePlanValue 等）也要「tile 集合 + 判存在」，走同一套分层标记，避免每次 new Set */
+  function tileStampEnter(map) {
+    return bfsEnter(map);
+  }
+
+  function tileStampExit() {
+    bfsExit();
+  }
 
   function where(enumerable, filterFunc) {
     var results = [];
@@ -1197,32 +1292,50 @@
   function breadth_first_foreach_fast_no_neut_cities(map, startTiles, maxDepth, foreachFunc) {
     if (startTiles.length === 0) return;
 
-    var frontier = new Deque();
-    var globalVisited = new Set();
+    /* 原版是 deque：appendleft 入队、pop 出队 ⇒ 先进先出；这里用「平行数组 + head 游标」等价实现，
+       顺带把每次调用的 Set 和 [tile, dist] 元组都省掉（见 bfsAcquireQueue 注释）。 */
+    var buf = bfsAcquireQueue();
+    var qTiles = buf.tiles;
+    var qDists = buf.dists;
+    var visit = bfsEnter(map);
+    var stamp = visit.arr;
+    var gen = visit.gen;
+    var head = 0;
 
-    for (var i = 0; i < startTiles.length; i++) {
-      var tile = startTiles[i];
-      if (tile.isMountain) continue;
-      globalVisited.add(tile.tile_index);
-      frontier.appendleft([tile, 0]);
-    }
-
-    while (!frontier.empty) {
-      var entry = frontier.pop();
-      var current = entry[0];
-      var dist = entry[1];
-      if (foreachFunc(current)) continue;
-
-      var newDist = dist + 1;
-      if (newDist > maxDepth) continue;
-      var movable = current.movable;
-      for (var m = 0; m < movable.length; m++) {
-        var nextTile = movable[m];
-        if (nextTile.isObstacle) continue;
-        if (globalVisited.has(nextTile.tile_index)) continue;
-        globalVisited.add(nextTile.tile_index);
-        frontier.appendleft([nextTile, newDist]);
+    // foreachFunc 是调用方回调，抛异常时若不释放，bfsExit 不执行 ⇒ 标记深度只增不减，
+    // 每层留下一个 Int32Array(空地数) 永久驻留。所以释放必须挂在 finally 上。
+    try {
+      for (var i = 0; i < startTiles.length; i++) {
+        var tile = startTiles[i];
+        if (tile.isMountain) continue;
+        stamp[tile.tile_index] = gen;
+        qTiles.push(tile);
+        qDists.push(0);
       }
+
+      while (head < qTiles.length) {
+        var current = qTiles[head];
+        var dist = qDists[head];
+        head++;
+
+        if (foreachFunc(current)) continue;
+
+        var newDist = dist + 1;
+        if (newDist > maxDepth) continue;
+        var movable = current.movable;
+        for (var m = 0; m < movable.length; m++) {
+          var nextTile = movable[m];
+          if (nextTile.isObstacle) continue;
+          var nextIdx = nextTile.tile_index;
+          if (stamp[nextIdx] === gen) continue;
+          stamp[nextIdx] = gen;
+          qTiles.push(nextTile);
+          qDists.push(newDist);
+        }
+      }
+    } finally {
+      bfsExit();
+      bfsReleaseQueue(buf);
     }
   }
 
@@ -2606,7 +2719,10 @@
     build_distance_map_matrix_with_max_depth: build_distance_map_matrix_with_max_depth,
     build_distance_map_matrix_with_skip: build_distance_map_matrix_with_skip,
     build_distance_map_matrix_with_start_dist: build_distance_map_matrix_with_start_dist,
-    extend_distance_map_matrix: extend_distance_map_matrix
+    extend_distance_map_matrix: extend_distance_map_matrix,
+
+    tileStampEnter: tileStampEnter,
+    tileStampExit: tileStampExit
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = EK;
