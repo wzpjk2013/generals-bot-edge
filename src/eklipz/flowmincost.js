@@ -1682,12 +1682,15 @@
    * 这里返回 null（原版上层靠这个降级）。
    */
   OrToolsFlowComputer.prototype.compute_flow = function (islands, graphData) {
-    // 默认走原来的 SPFA，**不是因为 OrTools 慢**（优化后求解器 28–32ms/次、整步 284ms
-    // 反而比 SPFA 的 333ms 快），而是因为成对 A/B 未过关：同机同种子串行比，OrTools 净差
-    // −6.25pt（四档 68.75% vs SPFA 75.0%，gc 掉 50pt）。切换门槛写在同一批实验记录里：
-    // 净差为正且至少 2 档不同向。
-    // GB_MCF_ORTOOLS=1 才启用（对拍/研究用），GB_MCF_SPFA=1 保留为强制回退（两个都不设 = SPFA）。
-    var solver = envFlag('GB_MCF_ORTOOLS') ? new OrToolsMinCostFlow() : new MinCostFlow();
+    // 默认 OrToolsMinCostFlow。它才是**数值忠实**的那一侧：oracle 200 例 flowDiff=0、
+    // 三份 arc dump 逐弧相等，而自研 SSP+Johnson 与 py 的差不是慢而是流量解不同
+    // （contribs[0].target[0] py=41.315952… vs SPFA=36.867857…）。
+    // 早前那批「OrTools 净差 −6.25pt」的小样本被 60 局成对 A/B 推翻：
+    // 五档 SPFA 50-10=83.33% vs OrTools 53-7=88.33%，净差 +3 局，gc/oim/kutu 三档同向为正，
+    // 单步 stepMs 五档反而略降（166→155）；代价是 gc/zlyv21 的平均回合数上升。
+    // 切换门槛「净差为正且至少 2 档不同向」已满足（记录见 _research/solver-ab-final.md）。
+    // GB_MCF_SPFA=1 回退到自研 SSP+Johnson；GB_MCF_ORTOOLS=1 保留为无副作用的空操作。
+    var solver = envFlag('GB_MCF_SPFA') ? new MinCostFlow() : new OrToolsMinCostFlow();
     for (var a = 0; a < graphData.start_nodes.length; a++) {
       solver.addArcWithCapacityAndUnitCost(
         graphData.start_nodes[a],

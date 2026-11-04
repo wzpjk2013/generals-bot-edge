@@ -1729,12 +1729,15 @@
 
     var deserts = bot.player.deserts;
     var tilesMinusDeserts = bot.player.tileCount - (deserts ? deserts.size : 0);
-    if (outOfPlayRat > 1.4 && (tilesMinusDeserts > 150 || bot.player.cityCount > 5 || bot.defensive_spanning_tree.length > 50)) {
+    // py BotExpansionOps.py:1670 用的是 len(bot.defensive_spanning_tree)；JS 侧它是 Set，
+    // 早先读 .length 恒为 undefined ⇒ 这个 50 格门槛从未生效过。
+    var defenseTreeCount = bot.defensive_spanning_tree ? bot.defensive_spanning_tree.size : 0;
+    if (outOfPlayRat > 1.4 && (tilesMinusDeserts > 150 || bot.player.cityCount > 5 || defenseTreeCount > 50)) {
       if (bot.force_far_gathers_sleep_turns <= 0 && !bot.force_far_gathers) {
         bot.force_far_gathers = true;
         bot.force_far_gathers_turns = map.remainingCycleTurns;
         var minTurns =
-          Math.max(pyFloorDiv(tilesMinusDeserts, 2), bot.defensive_spanning_tree.length + pyFloorDiv(outOfPlayCount, 2), outOfPlayCount) +
+          Math.max(pyFloorDiv(tilesMinusDeserts, 2), defenseTreeCount + pyFloorDiv(outOfPlayCount, 2), outOfPlayCount) +
           bot.board_analysis.inter_general_distance * outOfPlayRat;
         while (bot.force_far_gathers_turns <= minTurns) bot.force_far_gathers_turns += 50;
         var cap = outOfPlayCount;

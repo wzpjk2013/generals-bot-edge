@@ -96,6 +96,22 @@
     return _alias(bot, ['timings', 'botTimings']);
   }
 
+  function _ot(bot) {
+    return _alias(bot, ['opponent_tracker', 'opponentTracker']);
+  }
+
+  // 原版靠属性赋值刷新 timings（`bot.timings = BotTimings.get_timings(bot)`），
+  // 我们这边 _get_timings 才是封装过的入口（缺模块时会 noteMissing 而不是抛）。
+  function _recalcTimings(bot) {
+    if (typeof bot._get_timings === 'function') {
+      bot.timings = bot._get_timings();
+      return;
+    }
+    if (EK.BotTimings && typeof EK.BotTimings.get_timings === 'function') {
+      bot.timings = EK.BotTimings.get_timings(bot);
+    }
+  }
+
   function _turnsLeftInCycle(bot) {
     var map = _map(bot);
     var timings = _timings(bot);
@@ -1088,8 +1104,11 @@
   };
 
   /*
-   * 经济防守总开关。两人局 + 对手不是 AFK + 周期行为判定成立，才开。
-   * 原版还会先跑 check_should_defend_economy_based_on_large_tiles（依赖大格统计，见文件头第 4 条）。
+   * 经济防守总开关（对照 py BotDefense.py:2044-2149 的四个并列分支）。
+   * 顺序不能变：大格判定 → 周期行为 → 周期前段的「盘外集兵」段 → turn>=100 的胜负判定。
+   * 早先这里只移植了第二段，后两段缺失的直接后果是 `defend_economy` 在原版会转防守的
+   * turn>=100 局面里永远为 false，而它是 cityops/expansionops/gatherops/timings 一连串
+   * 分支的开关 —— 也就是「中盘被 rush 冲死」的第一嫌疑。
    */
   BotDefense.should_defend_economy = function (bot, defenseTiles) {
     var map = _map(bot);
@@ -1101,12 +1120,128 @@
     var targetPlayerObj = map.players[bot.targetPlayer];
     if (targetPlayerObj && targetPlayerObj.last_seen_move_turn < map.turn - 100) return false;
 
-    if (BotDefense.check_should_defend_economy_based_on_cycle_behavior(bot, defenseTiles)) {
+    var general = bot.general;
+    var genPlayer = general ? map.players[_player(general)] : null;
+    var vi = bot.viewInfo;
+
+    // 一、大格判定（原版 py:2059-2061）。函数早已移植但从未被调用。
+    if (BotDefense.check_should_defend_economy_based_on_large_tiles(bot)) {
       bot.defend_economy = true;
       return true;
     }
 
-    return alreadyDefEconomy;
+    // 二、周期行为判定（py:2063-2069）。判定成立后原版会重算 timings——
+    // 只在「上一回合还没在守经济」时重算，避免每回合都重算把周期抖掉。
+    if (BotDefense.check_should_defend_economy_based_on_cycle_behavior(bot, defenseTiles)) {
+      if (vi) vi.add_info_line('DEF ECON BASED ON CYCLE BEHAVIOR');
+      bot.defend_economy = true;
+      if (!bot.was_defending_economy) _recalcTimings(bot);
+      return true;
+    }
+
+    // 三、周期前段：兵都在盘外时，按「防守树从后往前」把需要的格子塞进 defenseTiles，
+    // 手里守得住就干脆不防守（py:2071-2108）。这一段同时是
+    // currently_forcing_out_of_play_gathers 的唯一置 True 点。
+    var timings = _timings(bot);
+    var turnInCycle = timings && typeof timings.get_turn_in_cycle === 'function'
+      ? timings.get_turn_in_cycle(map.turn) : -1;
+    var launchTiming = timings ? timings.launchTiming : -1;
+    if (timings && turnInCycle < launchTiming) {
+      var otEarly = _ot(bot);
+      if (bot.army_out_of_play
+        && otEarly && !otEarly.winning_on_army(1.5)
+        && otEarly.winning_on_economy(1.2, 25, undefined, -10)
+        && genPlayer && genPlayer.tileCount < 120
+        && !bot.flanking) {
+        var requirementRatio = bot.was_defending_economy ? 0.9 : 0.8;
+        var required = (bot.fog_risk_amount || 0) * requirementRatio;
+
+        var territories = _alias(bot, ['territories', 'territoryClassifier']);
+        var teamDist = territories && territories.territoryTeamDistances
+          ? territories.territoryTeamDistances[targetPlayerObj ? targetPlayerObj.team : 0] : null;
+        // 原版是 set 迭代后 sorted(...)：JS 侧 defensive_spanning_tree 也是 Set（botmain.js:425），
+        // 不能直接 slice。
+        var tree = bot.defensive_spanning_tree ? Array.from(bot.defensive_spanning_tree) : [];
+        if (teamDist && teamDist.raw) {
+          tree.sort(function (a, b) { return teamDist.raw[b.tile_index] - teamDist.raw[a.tile_index]; });
+        }
+
+        var totalDefensive = 0;
+        var totalDefensiveHeld = 0;
+        for (var i = 0; i < tree.length; i++) {
+          var t = tree[i];
+          if (totalDefensive < required) {
+            if (defenseTiles && typeof defenseTiles.add === 'function') defenseTiles.add(t);
+            if (vi && typeof vi.add_targeted_tile === 'function') vi.add_targeted_tile(t, EK.TargetStyle ? EK.TargetStyle.WHITE : undefined);
+            totalDefensiveHeld += t.army;
+          }
+          totalDefensive += t.army;
+        }
+
+        // 手里的防守格已经够了 ⇒ 这一回合不守经济（原版用严格大于）。
+        if (totalDefensive > required) return false;
+
+        bot.defend_economy = true;
+        if (!bot.currently_forcing_out_of_play_gathers) {
+          bot.currently_forcing_out_of_play_gathers = true;
+          _recalcTimings(bot);
+        }
+        return true;
+      }
+      bot.currently_forcing_out_of_play_gathers = false;
+    }
+
+    // 四、turn>=100 的胜负判定（py:2110-2147）。
+    // 注意原版这里还有一句 `if not hasEnoughArmyNearGeneral and winningArmy:
+    // bot.timings.split = bot.timings.cycleTurns` —— 全仓没有任何读 `.split` 的地方
+    // （消费点读的是 splitTurns，见 timings.js:116/120），所以那一句是死代码，不移植。
+    var winningText = 'first 100 still, no winning calc';
+    if (map.turn >= 100) {
+      var econRatio = 1.1;
+      var skipDefAfterArmyRatio = 1.42;
+      var enemyCatchUpOffset = -Math.min(20, Math.abs(map.remainingCycleTurns - 20)) - 5;
+
+      var ot = _ot(bot);
+      var winningEcon = ot ? ot.winning_on_economy(econRatio, 25, bot.targetPlayer, enemyCatchUpOffset) : false;
+      var winningArmy = ot ? ot.winning_on_army(skipDefAfterArmyRatio) : false;
+
+      var sp = _alias(bot, ['shortest_path_to_target_player', 'shortestPathToTargetPlayer']);
+      var boardAnalysis = _alias(bot, ['board_analysis', 'boardAnalysis']);
+      var pathLen = boardAnalysis && boardAnalysis.inter_general_distance
+        ? boardAnalysis.inter_general_distance
+        : (boardAnalysis && boardAnalysis.intergeneral_analysis && boardAnalysis.intergeneral_analysis.shortestPathWay
+          ? boardAnalysis.intergeneral_analysis.shortestPathWay.distance : 0);
+      if (sp) pathLen = sp.length;
+
+      var nearTiles = sp && sp.tileList ? sp.tileList : [];
+      var playerArmyNearGeneral = 0;
+      if (EK.BotCombatOps && typeof EK.BotCombatOps.sum_friendly_army_near_or_on_tiles === 'function' && nearTiles.length > 0) {
+        playerArmyNearGeneral = EK.BotCombatOps.sum_friendly_army_near_or_on_tiles(
+          bot, nearTiles, Math.floor(pathLen / 4) + 1);
+      }
+      var armyThresh = ot ? ot.get_approximate_fog_army_risk(bot.targetPlayer, 5, 1) : 0;
+      var hasEnoughArmyNearGeneral = playerArmyNearGeneral > armyThresh;
+
+      bot.defend_economy = !!winningEcon && (!winningArmy || !hasEnoughArmyNearGeneral);
+      var info = 'woe' + econRatio.toFixed(1) + ' (eCat ' + enemyCatchUpOffset + ') '
+        + String(winningEcon).charAt(0) + ', woa' + skipDefAfterArmyRatio + ' ' + String(winningArmy).charAt(0)
+        + ', enough_near_gen' + playerArmyNearGeneral + '/' + armyThresh + ' '
+        + String(hasEnoughArmyNearGeneral).charAt(0);
+      if (bot.defend_economy) {
+        winningText = '! ' + info;
+      } else if (alreadyDefEconomy) {
+        // 原版：这一回合算出来不该守，但上一回合已经在守 ⇒ 继续守（避免开关抖动）。
+        winningText = '? ' + info;
+        bot.defend_economy = true;
+      } else {
+        winningText = '  ' + info;
+      }
+    }
+
+    if (vi && typeof vi.add_stats_line === 'function') vi.add_stats_line(winningText);
+    if (vi) vi.addlTimingsLineText = winningText;
+
+    return !!bot.defend_economy;
   };
 
   /*
@@ -2384,8 +2519,9 @@
     var enemyLarge = EK.BotCombatOps.find_large_tiles_near(bot, pathTiles, 4, {
       forPlayer: bot.targetPlayer, allowGeneral: false, limit: 1, minArmy: 30
     });
+    // 原版 py:2475-2483 两个调用的 allowGeneral 都是 False（我方那个也是 False）。
     var friendlyLarge = EK.BotCombatOps.find_large_tiles_near(bot, pathTiles, 5, {
-      forPlayer: _player(general), allowGeneral: true, limit: 1, minArmy: 1
+      forPlayer: _player(general), allowGeneral: false, limit: 1, minArmy: 1
     });
 
     bot.is_blocking_neutral_city_captures = false;
