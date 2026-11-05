@@ -890,20 +890,63 @@
 
   // 确定性精确解：容量 + 「同一格子的选项互斥」。原版交给 CP-SAT/CBC/SCIP，
   // 平局解由求解器内部决定；这里用按价值密度排序的分支定界，平局保留先找到的组合。
-  function solveExactKnapsackWithConflicts(weights, values, turnBudget, exclusiveGroups) {
+  function buildOptionTileIdsFromConstraints(optionCount, tileToOptionIndices) {
+    var out = new Array(optionCount);
+    for (var i = 0; i < optionCount; i++) out[i] = [];
+    tileToOptionIndices.forEach(function (optionIndices, tileIndex) {
+      for (var k = 0; k < optionIndices.length; k++) out[optionIndices[k]].push(tileIndex);
+    });
+    return out;
+  }
+
+  // 互斥的表示方式：原先把每个 tile 的组展开成两两阻塞表（blocking[a] 里塞每个 b），
+  // 组大时是 O(组员²) 条边。真机长局里 options 会涨到 2243 条、每条 island 的 tileSet
+  // 又都不小，实测单次调用吃到 +1512MB 堆、3036ms（`gc 16838|0` T550）。
+  // 改成「按 tile 记占用计数」的惰性判定：语义与两两阻塞完全等价（等价于
+  // 「选中的 option 两两不共享 tile」），但内存是 O(Σ|tileSet|)、单节点判定 O(|tileSet|)。
+  // 搜索顺序、剪枝上界、NODE_CAP、刷新最优的比较全部不动，所以解不变。
+  function buildOptionTileCsr(optionTileIds) {
+    var n = optionTileIds.length;
+    var total = 0;
+    var i, k;
+    for (i = 0; i < n; i++) total += optionTileIds[i].length;
+    var flat = new Int32Array(total);
+    var offset = new Int32Array(n + 1);
+    var maxTile = -1;
+    var w = 0;
+    for (i = 0; i < n; i++) {
+      offset[i] = w;
+      var ids = optionTileIds[i];
+      for (k = 0; k < ids.length; k++) {
+        var t = ids[k];
+        flat[w++] = t;
+        if (t > maxTile) maxTile = t;
+      }
+    }
+    offset[n] = w;
+    return { flat: flat, offset: offset, maxTile: maxTile };
+  }
+
+  function solveExactKnapsackWithConflicts(weights, values, turnBudget, exclusiveGroups, optionTileIds) {
     var n = weights.length;
     if (n === 0) return { chosen: [], value: 0 };
 
-    var blocking = new Array(n);
-    for (var i = 0; i < n; i++) blocking[i] = [];
-    for (var g = 0; g < exclusiveGroups.length; g++) {
-      var group = exclusiveGroups[g];
-      for (var a = 0; a < group.length; a++) {
-        for (var b = 0; b < group.length; b++) {
-          if (a !== b) blocking[group[a]].push(group[b]);
+    var csr = optionTileIds ? buildOptionTileCsr(optionTileIds) : null;
+    var legacyBlocking = null;
+    if (!csr) {
+      // 没有 tile 表时退回两两阻塞（内部对照用，主路径总会给 optionTileIds）
+      legacyBlocking = new Array(n);
+      for (var bi = 0; bi < n; bi++) legacyBlocking[bi] = [];
+      for (var g = 0; g < exclusiveGroups.length; g++) {
+        var group = exclusiveGroups[g];
+        for (var a = 0; a < group.length; a++) {
+          for (var b = 0; b < group.length; b++) {
+            if (a !== b) legacyBlocking[group[a]].push(group[b]);
+          }
         }
       }
     }
+    var tileUse = csr ? new Int32Array(csr.maxTile + 1) : null;
 
     var order = sortIndices(
       (function () { var arr = []; for (var k = 0; k < n; k++) arr.push(k); return arr; })(),
@@ -937,36 +980,80 @@
       return bound;
     }
 
-    var best = { value: 0, weight: 0, chosen: [] };
+    // 最优解只记「值/重/长度」，子集拷进一条复用缓冲：搜索回退时 current 会变，所以必须
+    // 在改进的那一刻拷，不能等收尾再还原。
+    var bestValue = 0;
+    var bestWeight = 0;
+    var bestLen = 0;
+    var bestBuf = new Int32Array(n);
     var current = [];
     var currentValue = 0;
     var currentWeight = 0;
-    var blocked = new Uint8Array(n);
+    var blocked = legacyBlocking ? new Uint8Array(n) : null;
+    var blockStack = legacyBlocking ? new Int32Array(n) : null;
+    var blockTop = 0;
+    var legacyMark = 0;
+    // 按 tile 记占用的撤销日志：tile -> 计数，取 option 时 +1，回退时 -1。
+    var undoStack = csr ? new Int32Array(csr.flat.length > 0 ? csr.flat.length : 1) : null;
+    var undoTop = 0;
     var nodes = 0;
     var NODE_CAP = 300000;
 
+    function conflicts(idx) {
+      if (csr) {
+        var from = csr.offset[idx];
+        var to = csr.offset[idx + 1];
+        for (var p = from; p < to; p++) {
+          if (tileUse[csr.flat[p]] > 0) return true;
+        }
+        return false;
+      }
+      return blocked[idx] !== 0;
+    }
+
     function dfs(pos) {
       if (nodes++ > NODE_CAP) return;
-      if (currentValue > best.value ||
-        (currentValue === best.value && currentWeight < best.weight)) {
-        best = { value: currentValue, weight: currentWeight, chosen: current.slice() };
+      if (currentValue > bestValue ||
+        (currentValue === bestValue && currentWeight < bestWeight)) {
+        bestValue = currentValue;
+        bestWeight = currentWeight;
+        bestLen = current.length;
+        for (var q = 0; q < bestLen; q++) bestBuf[q] = current[q];
       }
       if (pos >= n) return;
-      if (currentValue + fractionalBound(pos, turnBudget - currentWeight) <= best.value) return;
+      if (currentValue + fractionalBound(pos, turnBudget - currentWeight) <= bestValue) return;
 
       var idx = order[pos];
       // 先试「拿」，与原版最大化目标一致
-      if (!blocked[idx] && weights[idx] + currentWeight <= turnBudget) {
+      if (!conflicts(idx) && weights[idx] + currentWeight <= turnBudget) {
         current.push(idx);
         currentValue += values[idx];
         currentWeight += weights[idx];
-        var addBlocked = [];
-        for (var k = 0; k < blocking[idx].length; k++) {
-          var other = blocking[idx][k];
-          if (blocked[other] === 0) { blocked[other] = 1; addBlocked.push(other); }
+        if (csr) {
+          var cf = csr.offset[idx];
+          var ct = csr.offset[idx + 1];
+          for (var c = cf; c < ct; c++) {
+            var tv = csr.flat[c];
+            tileUse[tv] += 1;
+            undoStack[undoTop++] = tv;
+          }
+        } else {
+          legacyMark = blockTop;
+          var bl = legacyBlocking[idx];
+          for (var k = 0; k < bl.length; k++) {
+            var other = bl[k];
+            if (blocked[other] === 0) { blocked[other] = 1; blockStack[blockTop++] = other; }
+          }
         }
         dfs(pos + 1);
-        for (var r = 0; r < addBlocked.length; r++) blocked[addBlocked[r]] = 0;
+        if (csr) {
+          // 本 option 的 tile 记录是连续压进去的，撤销条数等于它的 tile 数。
+          // tileSet 是按 Tile 去重的 Set，同一 tile 不会在一次 take 里重复出现。
+          var undoCount = ct - cf;
+          for (var u = 0; u < undoCount; u++) tileUse[undoStack[--undoTop]] -= 1;
+        } else {
+          while (blockTop > legacyMark) blocked[blockStack[--blockTop]] = 0;
+        }
         currentValue -= values[idx];
         currentWeight -= weights[idx];
         current.pop();
@@ -975,7 +1062,11 @@
     }
 
     dfs(0);
-    return { chosen: best.chosen.slice().sort(function (x, y) { return x - y; }), value: best.value };
+    // chosen_indices 的升序是 buildTilePlanOptionResult 的前提，排序必须保留。
+    var chosen = new Array(bestLen);
+    for (var c = 0; c < bestLen; c++) chosen[c] = bestBuf[c];
+    chosen.sort(function (x, y) { return x - y; });
+    return { chosen: chosen, value: bestValue };
   }
 
   function buildTilePlanOptionResult(options, values, chosenIndices, maxValue) {
@@ -1006,8 +1097,11 @@
     var constraints = buildTilePlanOptionConflictConstraints(options);
     var values = getTilePlanOptionIntegerValues(options, valueMultiple);
     var weights = options.map(function (opt) { return opt.length; });
+    // 惰性互斥判定要的是「每个 option 覆盖哪些 tile」，直接从 constraints 的
+    // tile -> option 反查表按 option 收集一遍，顺序无关（判定只看有没有占用）。
+    var optionTileIds = buildOptionTileIdsFromConstraints(options.length, constraints.tile_to_option_indices);
     var solved = solveExactKnapsackWithConflicts(
-      weights, values, turnBudget, constraints.mutually_exclusive_option_indices_by_tile);
+      weights, values, turnBudget, constraints.mutually_exclusive_option_indices_by_tile, optionTileIds);
     var result = buildTilePlanOptionResult(options, values, solved.chosen, solved.value);
     result.solver_status = 0;
     return result;
