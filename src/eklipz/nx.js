@@ -188,29 +188,47 @@
   /* ------------------------------------------------------------- Dijkstra */
   /*
    * nx._dijkstra_multisource 的完整复刻（不含 cutoff/target 提前退出）。
-   * 返回 {dist: Map(node->float), paths: Map(node->[node...])}。
+   *
+   * 与原版语义等价、只换表示的两处（内存）：
+   *  1. 原版返回时把每个节点的整条路径物化成 `paths[v] = paths[pred[v][0]] + [v]`，
+   *     总代价 O(Σ路径长度)。真机上 steiner 每回合调用多次，长局里这条是分配大户。
+   *     这里只保留 `pred`（节点 → 首次改进它的前驱）与 `srcOf`（节点 → 该 pred 链的源终端），
+   *     `paths` 换成按需重建的惰性视图。
+   *     **不变量：`paths.get(v)[0] === srcOf.get(v)`。** 这是与原版等价的关键
+   *     （原版路径的首元素就是递归链底的源终端），后来的改动必须保住它。
+   *  2. 堆元素 `[dist, counter, node]` 每次 push 都新建数组；pop 之后就地清零放回池子复用。
+   *
+   * 返回 {dist: Map(node->float), paths: {get, has}, srcOf: Map(node->source)}。
    */
   function dijkstraMultisource(G, sources, key) {
     var dist = new Map();
     var seen = new Map();
-    var pred = new Map(); // node -> [firstPred]
+    var pred = new Map(); // node -> 首次改进它的前驱节点（原版存 [firstPred]，实际只读 [0]）
+    var srcOf = new Map(); // node -> 该 pred 链的源终端
     var fringe = [];
+    var triplePool = [];
     var counter = 0;
-    var counts = 0;
     var i;
     for (i = 0; i < sources.length; i++) {
-      seen.set(sources[i], 0);
-      heapPush(fringe, [0, counter++, sources[i]]);
-      counts++;
+      var s0 = sources[i];
+      seen.set(s0, 0);
+      srcOf.set(s0, s0);
+      heapPush(fringe, poolTriple(triplePool, 0, counter++, s0));
     }
     while (fringe.length > 0) {
       var top = heapPop(fringe);
       var dv = top[0];
       var v = top[2];
+      // 三元组出堆后立刻清位回收；下面只用 dv / v
+      top[0] = 0;
+      top[1] = 0;
+      top[2] = undefined;
+      triplePool.push(top);
       if (dist.has(v)) continue;
       dist.set(v, dv);
       var nbrs = G._adj.get(v);
       if (nbrs === undefined) continue;
+      var vSrc = srcOf.get(v);
       for (var e of nbrs) {
         var u = e[0];
         var cost = weightOf(e[1], key);
@@ -218,32 +236,58 @@
         if (dist.has(u)) continue; // nx 这里只在负权时报错，正权下等价于跳过
         if (!seen.has(u) || vu < seen.get(u)) {
           seen.set(u, vu);
-          heapPush(fringe, [vu, counter++, u]);
-          pred.set(u, [v]);
+          heapPush(fringe, poolTriple(triplePool, vu, counter++, u));
+          pred.set(u, v);
+          srcOf.set(u, vSrc);
         }
       }
     }
-    var paths = new Map();
-    for (i = 0; i < sources.length; i++) paths.set(sources[i], [sources[i]]);
-    var skipped = 0;
-    for (var entry of dist) {
-      var node = entry[0];
-      if (skipped < counts) {
-        skipped++;
-        continue;
+
+    var paths = {
+      // 按需重建单条路径：从 node 沿 pred 上溯到源再反转。只给真的需要路径的调用方用。
+      get: function (node) {
+        if (!srcOf.has(node)) return undefined;
+        var chain = [];
+        var cur = node;
+        for (;;) {
+          chain.push(cur);
+          var p = pred.get(cur);
+          if (p === undefined) break;
+          cur = p;
+        }
+        chain.reverse();
+        return chain;
+      },
+      has: function (node) {
+        return srcOf.has(node);
       }
-      var p = pred.get(node);
-      if (p === undefined) continue; // 理论上不会发生：有距离的非源点必有前驱
-      paths.set(node, paths.get(p[0]).concat([node]));
+    };
+    return { dist: dist, paths: paths, srcOf: srcOf };
+  }
+
+  function poolTriple(pool, d, c, node) {
+    if (pool.length > 0) {
+      var t = pool.pop();
+      t[0] = d;
+      t[1] = c;
+      t[2] = node;
+      return t;
     }
-    return { dist: dist, paths: paths };
+    return [d, c, node];
   }
 
   function multiSourceDijkstra(G, sources, key) {
+    var uniq = [];
+    var seenSrc = new Set();
     for (var i = 0; i < sources.length; i++) {
       if (!G._adj.has(sources[i])) throw new Error('nx: node ' + sources[i] + ' not in graph');
+      // 重复终端会让下游「按源个数跳过 dist 前几项」的口径失效，去重是无副作用的护栏
+      if (!seenSrc.has(sources[i])) {
+        seenSrc.add(sources[i]);
+        uniq.push(sources[i]);
+      }
     }
-    return dijkstraMultisource(G, sources, key);
+    return dijkstraMultisource(G, uniq, key);
   }
 
   function dijkstraPath(G, source, target, key) {
@@ -315,16 +359,16 @@
   function mehlhornSteinerTree(G, terminalNodes, key) {
     var r = multiSourceDijkstra(G, terminalNodes, key);
     var dist = r.dist;
-    var paths = r.paths;
+    // 原版取 `paths.get(v)[0]`（最近终端）；惰性视图下等价于 srcOf.get(v)（见 Dijkstra 段的不变量）
+    var srcOf = r.srcOf;
 
     var s = new Map(); // v -> 最近终端
     var d1 = new Map(); // v -> Map(terminal -> dist)
     var nodes = G.nodes();
     for (var i = 0; i < nodes.length; i++) {
       var v = nodes[i];
-      var p = paths.get(v);
-      if (p === undefined) throw new Error('nx: unreachable node ' + v + ' in steiner');
-      var term = p[0];
+      var term = srcOf.get(v);
+      if (term === undefined) throw new Error('nx: unreachable node ' + v + ' in steiner');
       s.set(v, term);
       var m = d1.get(v);
       if (m === undefined) {
