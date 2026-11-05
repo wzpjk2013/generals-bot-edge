@@ -102,6 +102,9 @@
     /* 是否在确定性口径（钉死或虚拟时钟）。脚本用它断言「这批数可复现」。 */
     isDeterministic: function () { return fixed !== null || tick !== null; },
     tickSpacing: function () { return tick; },
+    /* 把虚拟时钟拨回原点。botmain 的 find_move 每次决策前调用 ⇒ 每回合拿到同样的预算起点，
+     * 与「这一局是第几局、进程跑了多久」无关（真机也是每回合一份新预算）。 */
+    resetTick: function () { tickCalls = 0; },
     /* 决策用的「现在」（秒）。钉死时恒等，TICK 模式按读数次数前进。 */
     nowSec: function () {
       if (fixed !== null) return fixed;

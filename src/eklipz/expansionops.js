@@ -676,10 +676,25 @@
     return 0.2;
   }
 
+  /*
+   * BotExpansionOps.py:332 原话是 `BotTimings.calculate_greedy_turns_available(bot) > 0`——
+   * 这是 BotTimings 上的**静态函数**，必须把 bot 传进去。
+   *
+   * 之前这里写的是 `bot.timings.calculate_greedy_turns_available()`：实例上根本没有这个方法
+   * （timings.js 把它挂在 `EK.BotTimings` 上），`typeof` 判定失败后直接落到 `return 0`
+   * ⇒ 第 587 行的条件恒假 ⇒ `haveFullExpPlanAlready` 永不成立 ⇒ 每回合都被当成
+   * 「还没有完整扩张计划」，既不会走 `forceBypassLaunch`，也不会提前压 launch/gather split。
+   *
+   * 模块缺失时的退路是读本回合 `pick_move_after_prep` 已经算好的
+   * `bot.approximate_greedy_turns_avail`（botmain.js:1709，同一次调用、同一个函数），
+   * 差别只是少了 viewInfo 的统计行。
+   */
   function greedy_turns_available(bot) {
-    var t = bot.timings;
-    if (t && typeof t.calculate_greedy_turns_available === 'function') return t.calculate_greedy_turns_available();
-    return 0;
+    if (EK.BotTimings && typeof EK.BotTimings.calculate_greedy_turns_available === 'function') {
+      return EK.BotTimings.calculate_greedy_turns_available(bot);
+    }
+    var cached = bot.approximate_greedy_turns_avail;
+    return typeof cached === 'number' ? cached : 0;
   }
 
   /* ------------------------------------------------------------------ */

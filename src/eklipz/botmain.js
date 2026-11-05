@@ -764,6 +764,11 @@
     var map = this._map;
     var move;
     var turn = map.turn;
+    /* 虚拟时钟（GB_EK_DET_TICK）每走一回合重新起算。
+     * 不重置的话 tickCalls 会在进程内一路累加 ⇒ 同一份代码、同一个 seed/side，放在「单局进程」
+     * 和「8 局进程」里会拿到不同的 now ⇒ 预算切点不同 ⇒ 结果不同（实测 kutu 8919|1：单局 win 337，
+     * 8 局批次里 win 376）。真机本来就是「每回合一份新的时间预算」，这里对齐同一语义。 */
+    if (EK.clock && EK.clock.resetTick) EK.clock.resetTick();
     try {
       move = this.select_move(is_lag_move);
 

@@ -22,6 +22,9 @@
     return [0, values.length].concat(values);
   }
 
+  /* 连续这么多次接不住包才重建引擎（见 plan() 里 map 异常那段）。 */
+  var MAP_ERR_RESET_LIMIT = 30;
+
   function playerCount(S) {
     var n = 0;
     if (S.usernames && S.usernames.length > n) n = S.usernames.length;
@@ -219,15 +222,47 @@
         this.map.apply_server_update(packet);
       }
     } catch (e) {
-      // 地图层吃不下的包（例如自己上一手没生效导致 delta 对不上）就让这一回合空过，
-      // 并把整局引擎重建 —— 带着错位的内部状态继续走只会越走越歪。
+      /*
+       * 地图层吃不下的包（自己上一手没生效导致 delta 对不上、FFA 里从雾推断归属失败……）。
+       *
+       * 以前这里直接 `reset()` 把整局拆了重建。那在 FFA 里是致命的：只要某种包每回合都让
+       * map.apply_server_update 抛一次，引擎就会「每回合重新开局」，面板永远停在回合 0、
+       * 一步不出（真机 FFA 卡死就是这么来的）。原版 Python 不会这么做——异常被
+       * `make_move(rethrow=False)` 吞掉，这一回合空过，地图状态继续往前走。
+       *
+       * 现在的口径：本回合空过、状态保留；只有**连续** MAP_ERR_RESET_LIMIT 次接不住包，
+       * 才认定内部状态真的坏了并重建。
+       */
       this.errors += 1;
+      this.mapErrRun = (this.mapErrRun || 0) + 1;
       this.lastError = 'map: ' + ((e && e.message) || e);
       this.lastStack = (e && e.stack) || '';
       this.noteError('map', e);
-      this.reset();
+      if (this.mapErrRun >= MAP_ERR_RESET_LIMIT || !this.started || !this.bot) {
+        this.reset();
+        return [];
+      }
+      /*
+       * 接不住这一包也不许摆烂：原版是被 `make_move(rethrow=False)` 吞掉后「这一回合不出招」，
+       * 但真机上「不出招」在 FFA 里就表现为整局一动不动。所以这里改成拿**上一回合的地图状态**
+       * 继续出招（地图旧一回合，比完全不动强得多；出不了合法招时服务器本来也会忽略）。
+       */
+      this.staleMapMoves = (this.staleMapMoves || 0) + 1;
+      var staleMove = null;
+      try {
+        staleMove = this.bot.find_move();
+      } catch (e2) {
+        this.errors += 1;
+        this.lastError = 'move: ' + ((e2 && e2.message) || e2);
+        this.lastStack = (e2 && e2.stack) || '';
+        this.noteError('move', e2);
+      }
+      if (staleMove && staleMove.source && staleMove.dest) {
+        return [[staleMove.source.tile_index, staleMove.dest.tile_index, !!staleMove.move_half]];
+      }
       return [];
     }
+    this.mapErrRun = 0;
 
     var t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     var move = null;
