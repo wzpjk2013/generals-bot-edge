@@ -1486,7 +1486,9 @@
   }
   function nowSeconds() {
     if (_fixedNow !== null) return _fixedNow;
-    if (EK.clock && EK.clock.isFixed()) return clockNowSec();
+    /* 只要装了 clock 就用它（含 GB_EK_DET_TICK 虚拟时钟）。早先只认 isFixed()，tick 模式
+     * 会退回真实墙钟 ⇒ 同一局面两次跑的预算切点不同、整局结果不可复现。 */
+    if (EK.clock) return clockNowSec();
     return Date.now() / 1000;
   }
   // cutoff 为 null 表示「不给时间预算」。不能拿它直接跟 now 比：JS 里 null→0，

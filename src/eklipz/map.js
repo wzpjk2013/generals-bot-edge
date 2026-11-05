@@ -559,11 +559,15 @@
   };
 
   P._shuffle_in_place = function (tile) {
-    var list = [tile.movable, tile.adjacents, tile.visibleTo];
+    /* 顺序照 py `base/client/map.py:1207-1209`：adjacents → visibleTo → movable。
+     * 早先用 `Math.random()` 且顺序不同：既不可复现（同一局面两次跑邻接表顺序不同 ⇒
+     * 同代价候选先后不同 ⇒ 整局结果漂移），也与原版消耗顺序不一致。改走 EK.rng 固定种子。 */
+    var list = [tile.adjacents, tile.visibleTo, tile.movable];
+    var rand = (EK.rng && typeof EK.rng.random === 'function') ? EK.rng.random : Math.random;
     for (var l = 0; l < list.length; l++) {
       var arr = list[l];
       for (var i = arr.length - 1; i > 0; i--) {
-        var j = (Math.random() * (i + 1)) | 0;
+        var j = (rand() * (i + 1)) | 0;
         var tmp = arr[i];
         arr[i] = arr[j];
         arr[j] = tmp;
