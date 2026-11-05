@@ -629,12 +629,105 @@ T50：option 数 82 与 py 相同、平局选择已强制成 py 的 `[10,69]`，
 - **`EK.clock` 接线早已铺开**：13 个文件都有 `function clockNowMs(){return EK.clock?EK.clock.nowMs():Date.now()}`
   这套本地包装，`search.js` 的 deadline、`gathermax.js:534` 的 `cutoffTime`、`gatherops.js` 的
   `_get_remaining_move_time` 全走 clock。`earlyexpandutils.js:1440` 的 `return Date.now()/1000;`
-  **不是漏点**——它上一行 `if (EK.clock && EK.clock.isFixed()) return clockNowSec();` 已经拦住了，
-  最后那行只是"未固定时用真实时钟"的兜底。别再去改它。
+  曾被我判为"不是漏点"（理由：上一行 `if (EK.clock && EK.clock.isFixed())` 拦住了）——**这个判断错了**，
+  见下一节第 3 条：它只拦住 `GB_EK_DET=1`（钉死），拦不住 tick 虚拟时钟，于是 tick 模式下这条路退回
+  真实墙钟，同一局面两次跑的预算切点不同。现已改成"只要装了 clock 就走它"。
 - **knapsack 的估算系数必须抄 C++ 那一支**：原版线上跑的是 C++ 扩展
   （`KnapsackUtilsCpp.cpp:46` 系数 `4e-8`），而 `GB_PURE_PY_KNAPSACK=1` 的 purepy 是 `2.2e-7`
   （阈值同为 `0.005`）⇒ 照 purepy 抄会让 JS **比真机早 5.5 倍**抛
   `Knapsack potential long run est …`，临床表现是"整回合不出招"。JS 侧按 `4e-8` 对齐，
   py oracle 侧也要把系数 patch 成同一值，否则对拍会出现"py 抛 / js 不抛"的假差异。
   —— 这条是「oracle 与被测侧必须同一阈值」的一个实例，和「同一时间语义」是一类错误。
+
+### 九、擂台口径重建：墙钟测不出东西，必须用 tick 虚拟时钟
+
+**先看噪声有多大。** 同一份代码连跑两遍 `node scripts/ekjs.js gc 8`（`GB_EK_LAND=0`，墙钟口径），
+逐局比 `result/turns/land/army`：
+
+| 对比 | 逐局不同 |
+| --- | --- |
+| 同代码 new vs new2 | **7 / 8 局** |
+| 旧代码 old vs old2 | **5 / 8 局** |
+| 跨版本 old vs new | 7 / 8 局 |
+
+同一个 `seed 16838 side 0` 的回合数能 259 vs 348（差一倍），胜负能翻。也就是说此前
+「涨了两个点 / 掉了五个点」的结论全部落在 **±3~4 局**的噪声里，等于没测。kutu 在
+50 / 62.5 / 75 / 87.5% 之间跳，**不是代码在变，是搜索深度被墙钟切在不同位置**。
+
+**为什么不能直接用 `GB_EK_DET=1`。** 它把时钟钉死，等价于「时间永远够用」，所有「到点就 break」
+的分支永不触发 ⇒ 搜索跑满全深度，kutu 档从 0.2s/回合涨到 1.7s/回合（8.5×），16 局要 3.4 小时。
+可复现但跑不动。
+
+**解法：`GB_EK_DET_TICK=<秒>`。** `EK.clock.nowSec()/nowMs()` 每次被读就前进一个固定量
+（`tickBase = 1000 + tickCalls * tick`）。预算仍然有限（和真机一个量级），但**只由「被读次数」
+决定、与机器快慢无关** ⇒ 既可复现又跑得动。
+口径红线：tick 模式的绝对预算不等于真实毫秒，**只用于比较两份代码谁强**；报耗时一律走
+`EK.clock.realMs()`。
+
+**光有时钟还不够，还有三处绕过它的随机/时间源：**
+
+1. `src/eklipz/earlyexpandutils.js` 的 `nowSeconds()` 只在 `isFixed()` 时用引擎时钟，tick 模式下
+   退回 `Date.now()` ⇒ 改成一有 clock 就走它。
+2. `src/eklipz/map.js` 的 `_shuffle_in_place` 用 `Math.random()` 洗 `tile.movable/adjacents/visibleTo`，
+   而原版 `base/client/map.py:1207-1209` 是 `random.shuffle`（有状态伪随机）。同一局面两次跑邻接表
+   顺序不同 ⇒ 同代价候选先后不同 ⇒ 整局漂移。改走新增的 `EK.rng`（固定种子 LCG），并顺带把洗牌
+   顺序对齐成 py 的 adjacents → visibleTo → movable（原来是反着来的）。
+3. `src/eklipz/earlyexpandutils.js` 的 `randomSkip` 兜底 `Math.floor(Math.random() * ...)`（py 是
+   `random.choice`）。`theRng()` 现在能拿到 `EK.rng`，走不到兜底。
+
+**纪律**：`Math.random()` 与裸 `Date.now()` 参与决策即视为 bug。
+
+**验收**：`GB_EK_LAND=0 GB_EK_DET_TICK=0.0002 node scripts/ekjs.js gc 2` 连跑两遍，逐局
+`result/turns/land/army` **零差异**（修前 1/2 局不同）；扩到 `gc 8` 连跑两遍 **diffs=0**（8 局逐位相同），
+stepMs 186,131 vs 180,127 —— 没被钉死拖慢。
+
+**确定性五档基线（`GB_EK_LAND=0 GB_EK_DET_TICK=0.0002`，8 局/档，v1.2.13+`a40ac6b`）：**
+
+| 档 | 胜率 | 每步 | 非法招 |
+| --- | --- | --- | --- |
+| gc | 7-1 = 87.5% | 183ms | 1 |
+| szly | 7-1 = 87.5% | 229ms | 1 |
+| zlyv21 | 8-0 = 100.0% | 202ms | 1 |
+| kutu | 6-2 = 75.0% | 132ms | 2 |
+| oim | 6-2 = 75.0% | 117ms | 1 |
+
+合计 **35-5 = 87.5%**，出招异常 0，非法招合计 6 条（墙钟口径同期是 19~61 条 ⇒ 那批 illegal 里有
+相当一部分本身是时钟抖动抖出来的，不是真 bug）。**今后所有胜率结论一律以这张表的口径为准，
+并且必须能连跑两遍复现。**
+
+### 十、`greedy_turns_available` 恒 0：不是取舍问题，是少了两个函数
+
+`src/eklipz/expansionops.js` 里 `haveFullExpPlanAlready` 依赖 `greedy_turns_available(bot)`，
+而它读的是 `bot.timings.calculate_greedy_turns_available` —— **实例上不存在这个方法**，恒 0。
+
+先做过一次 A/B（`_research/ab-greedy-tick-report.md`，tick 口径 16 局，`GB_NO_GREEDY_BYPASS=1`
+绕过桩、直接给非 0 值）：胜率净胜 0（kutu 3-3、oim 3-3，两档同向性也不成立）⇒ 开关默认关。
+但**证伪的只是「断线导致每回合重算整套扩张计划」这句话**：两臂的 `planCalls/回合` 几乎相同
+（kutu 1.15 vs 1.22、oim 0.93 vs 1.11），`planCalls/局` 的差值全部来自回合数变少。
+
+**稳定且方向明确的差异是「收尾速度」**：
+
+| 档 | avgTurns off→on | planMs/局 off→on |
+| --- | --- | --- |
+| kutu | 350.0 → 283.0（−19%） | 15162 → 12218 |
+| oim | 538.0 → 310.3（−42%） | 17586 → 12980 |
+
+`oim seed 1000` 两臂都赢，但 off 是 `832 回合 land 293:0`（抹干净才结束），on 是 `251 回合 63:47`
+（目标达成即收尾）—— 正是早先「打得进但收不干净」那个形态。
+
+**回源结论**：py 侧这两个函数是真实实现的，我们只是没移植——
+
+- `Base/BotTimings.py:53 def calculate_greedy_turns_available(bot: EklipZBot) -> int:`（`:85` 调
+  `bot.opponent_tracker.get_approximate_greedy_turns_available(...)`）；
+- `Base/OpponentTracker.py:1747 def get_approximate_greedy_turns_available(self, againstPlayer,
+  ourArmyNonIncrement, opponentArmyOffset=0) -> int:`；
+- `bot_ek0x45.py:1432 self.approximate_greedy_turns_avail = BotTimings.calculate_greedy_turns_available(self)`
+  （每回合刷新实例属性）；
+- 消费点：`Base/BotExpansionOps.py:332 and BotTimings.calculate_greedy_turns_available(bot) > 0`、
+  以及 `expansionops.js:619-625 ↔ py BotExpansionOps.py:354-358` 的提前压 `splitTurns`。
+
+⇒ 正解是逐行移植这两个函数 + 每回合写 `bot.approximate_greedy_turns_avail`，然后**删掉
+`GB_NO_GREEDY_BYPASS` 开关**，不要长期留一条「发明出来的非 0 值」的 A/B 分叉。
+
+
 
