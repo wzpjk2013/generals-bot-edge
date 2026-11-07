@@ -1157,6 +1157,15 @@
     if (!gathers || gathers.length === 0) return null;
     if (!valueFunc) valueFunc = get_tree_move_default_value_func(bot);
     var move = EK.Gather.get_tree_move(gathers, valueFunc, !!pop);
+    // BotGatherOps.py:1023-1035 的守卫：Gather.get_tree_move 只按价值挑叶子，可能挑到
+    // 「起点不是我方格」的那一手，这时去全量招法里再找一条「起点我方、兵>1」的替代，找不到就 null。
+    //
+    // 已知缺陷（本轮不修，只记录）：`generalOf(bot).player` 在本仓是**方法**而不是属性，
+    // 与 move.source.player()（数字）恒不相等 ⇒ 这个守卫每次都会触发，永远是「用替代招的那条路」。
+    // 实测把它改成 player() 后：防守集兵开始正常出招，但 `ekdiff-move gm1 --from=1 --to=120`
+    // 从 96.00% 掉到 91.94%（T51/T55/T61/T62 四处新分叉）—— 说明我们的 get_tree_move 价值序
+    // 与原版本来就有差，一直被这段遮蔽。要修得先对齐 get_tree_move 的排序，不能在守卫这里单点改。
+    // 记录见 `_research/general-defense-gap.md` §5.5。
     if (move && move.source.player() !== generalOf(bot).player) {
       var moves = EK.Gather.get_tree_moves(gathers, valueFunc, -1, false);
       for (var i = 0; i < moves.length; i++) {
@@ -1203,7 +1212,13 @@
 
     var map = mapOf(bot);
     var general = generalOf(bot);
-    var isDict = !Array.isArray(targets) && !(targets instanceof Set) && !(targets instanceof Map);
+    // py 的判定是 `isinstance(targets, dict)`（BotGatherOps.py:1149）。本仓的 dict 是 Map
+    // （ThreatObj.convert_to_dist_dict 返回 Map<Tile, number>）。早先把 Map 也算成「不是 dict」，
+    // 于是 py 走 knapsack 的这条路我们走了 max_set —— max_set 只认「能在 gatherTurns 内吃下的价值」，
+    // 而防守集兵的 targets 是威胁路径（敌方格），长出来的叶子起点不是我方格，
+    // 被 get_tree_move_default 的守卫判掉 ⇒ 防守集兵恒空、将军格零增援。
+    var isDict = (targets instanceof Map)
+      || (!Array.isArray(targets) && !(targets instanceof Set));
 
     if (useTrueValueGathered && targetArmy > -1) targetArmy += 1;
 

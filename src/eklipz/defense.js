@@ -2250,15 +2250,20 @@
     if (!threat.path.tail.tile.isGeneral) {
       var dangerTiles = BotDefense.get_danger_tiles(bot);
       if (dangerTiles && dangerTiles.length > 0) negatives.add(general);
+      // BotDefense.py:776-791：只有「我们要守的不是将军格、但将军又快被打死」时才需要保留 blocker，
+      // 否则会把城防集兵饿死。早先这里写成「守将军时全塞进去」，方向相反 —— 那等于禁止
+      // 往自己的防守格集兵，是「守将集群 68/68 全空」的成因之一。
+      var da = _alias(bot, ['dangerAnalyzer', 'danger_analyzer']);
+      var hasLethalGeneralThreat = (da && da.fastestThreat && da.fastestThreat.turns > -1)
+        || (da && da.fastestAllyThreat && da.fastestAllyThreat.turns > -1);
+      var blockingInfo = bot.blocking_tile_info;
+      if (hasLethalGeneralThreat && blockingInfo) {
+        if (blockingInfo instanceof Map) blockingInfo.forEach(function (_, t) { void _; negatives.add(t); });
+        else for (var bt in blockingInfo) negatives.add(blockingInfo[bt].tile || bt);
+      }
     }
     if (additionalNegatives) {
       additionalNegatives.forEach(function (t) { negatives.add(t); });
-    }
-    // 将军会被秒的时候，任何已经被占掉的防守格都别再加兵
-    var blocking = bot.blocking_tile_info;
-    if (blocking && threat.path.tail.tile.isGeneral) {
-      if (blocking instanceof Map) blocking.forEach(function (_, t) { void _; negatives.add(t); });
-      else for (var bt in blocking) negatives.add(blocking[bt].tile || bt);
     }
 
     var prioMatrix = new EK.MapMatrix(map, 0.0);
@@ -2268,13 +2273,29 @@
       if (v !== null) prioMatrix.raw[_idx(allTiles[ti])] = 0.0001 * v;
     }
 
-    var targetArmy = requiredContribution === null || requiredContribution === undefined
+    // BotDefense.py:756-763：gatherMax 时 targetArmy 直接置 -1（「凑到就好、允许少于威胁值」），
+    // 不是「取所需兵数的负数」。早先写成 -Math.max(...) 会变成 -12 这样的绝对值更大的负数，
+    // 语义完全不同。
+    var targetArmy = (requiredContribution === null || requiredContribution === undefined)
       ? -1 : requiredContribution;
-    if (gatherMax && targetArmy >= 0) targetArmy = -Math.max(targetArmy, threat.threatValue);
+    if (gatherMax) targetArmy = -1;
 
-    var res = EK.BotGatherOps.get_defensive_gather_to_target_tiles(bot, _tilesFromDistDict(distDict),
+    // BotDefense.py:806-821：targets 传的是 distDict 本身（dict），不是 tile 数组 ——
+    // get_gather_to_target_tiles 的分支判据是 `!isDict`（py BotGatherOps.py:1149），
+    // 转成数组会从 knapsack 支切到 max_set 支，长出来的树叶是敌方格，
+    // 被 get_tree_move_default 的「起点必须是我方格」守卫判掉 ⇒ 防守集兵恒空。
+    var threatAA = threat.armyAnalysis;
+    var leafPrioFunc = force_turns_up_threat_path === 0
+      ? BotDefense.get_defense_tree_move_prio_func(bot, threat)
+      : null;
+
+    var res = EK.BotGatherOps.get_defensive_gather_to_target_tiles(bot, distDict,
       timeLimit, gatherDepth,
-      negatives, targetArmy, true, null, false, false, 0, null, null, prioMatrix, null, !!shouldLog, !!fastMode);
+      negatives, targetArmy, false /* useTrueValueGathered */, leafPrioFunc,
+      true /* includeGatherTreeNodesThatGatherNegative */, false, 0,
+      threatAA ? threatAA.aMap : null /* distPriorityMap */,
+      threatAA ? threatAA.bMap : null /* depthPriorityMap */,
+      prioMatrix, null, !!shouldLog, !!fastMode);
     var tuple = _gatherTuple(res);
     var move = EK.BotGatherOps.get_tree_move_default(bot, tuple[3]);
     return [move, tuple[1], tuple[2], tuple[3]];
