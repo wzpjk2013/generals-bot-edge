@@ -85,7 +85,8 @@ function mulberry32(a) {
 }
 
 /* 一局：jsSide 是我们（EK.Bot），另一侧是 Python 原版。规则、迷雾、收入与 arena 完全一致。 */
-async function playGameVsPy(seed, jsSide) {
+async function playGameVsPy(seed, jsSide, opts) {
+  opts = opts || {};
   const board = A.makeMap(mulberry32(seed));
   if (!board) return null;
   const pySide = 1 - jsSide;
@@ -174,6 +175,8 @@ async function playGameVsPy(seed, jsSide) {
           if (mv) {
             const ok = A.applyMove(board, p, mv[0], mv[1], mv[2]);
             lastJsMove = [mv[0], mv[1], !!mv[2], ok];
+            /* 探针钩子：出招前/后的现场，供 _research 里的诊断脚本读引擎内部状态。 */
+            if (opts.onTurn) opts.onTurn({ turn: turn, side: p, mv: mv, ok: ok, board: board, ek: ek.bot });
             if (!ok) illegal.push([turn, mv[0], mv[1], mv[2]]);
             if (TRACE) {
               console.log('T' + turn + ' js ' + (mv[0] % W) + ',' + Math.floor(mv[0] / W) +
